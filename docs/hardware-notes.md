@@ -222,19 +222,22 @@ coating keeps water off the pads, so a water film cannot bridge the BAT+ pad and
 the wake pin. Acrylic coating also dissolves again in solvent, so a later repair
 stays possible.
 
+Coat the electronics only. The target is the top of the carrier board, around
+the switch and the BAT+ pad.
+
 **Mask these parts before you coat the board:**
 
+- **the probe. Never coat it.** The probe must sense the soil. A coating adds a
+  dielectric layer over the probe area and changes the reading. It costs you
+  accuracy and protects nothing, because the probe already has soldermask over
+  it and is designed to sit in wet soil.
 - the USB-C connector;
 - the u.FL antenna connector;
 - the battery holder contacts;
 - the pin headers between the two boards;
 - the switch itself, if you keep it. If the coating gets inside the switch, the
-  switch does not work. If you removed CN4, coat the empty pads instead. They are the exact
-  place where the leak starts.
-
-**Recalibrate after you coat the probe.** The coating adds a dielectric layer
-over the probe area, so the dry and wet voltages move. Refer to the
-calibration commands in the README.
+  switch does not work. If you removed CN4, coat the empty pads instead. They are
+  the exact place where the leak starts.
 
 ### 5. Remove the switch
 
