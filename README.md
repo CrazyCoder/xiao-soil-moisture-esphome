@@ -155,10 +155,15 @@ board.
 
 ### Windows notes
 
-**Use PowerShell or the Command Prompt. Do not use Git Bash or an MSYS2 shell.**
+**Build from PowerShell or the Command Prompt.** If you do that, the rest of this
+section does not affect you.
+
+The trap below applies only to a shell of the MSYS family: Git Bash, an MSYS2
+terminal, or any terminal that puts `Git\usr\bin` on the `PATH`. Some editors
+and agent tools also use Git Bash as their default shell.
 
 ESP-IDF refuses to build under MSYS or MinGW. If `MSYSTEM` is set, or if
-`Git\usr\bin` is on your `PATH`, ESP-IDF detects an MSYS environment and skips
+`Git\usr\bin` is on the `PATH`, ESP-IDF detects an MSYS environment and skips
 the link step. **ESPHome then still prints `Successfully compiled program` and
 exits 0.** It produces no binary. A later `upload` flashes an old binary, or it
 fails for a reason that makes no sense.
