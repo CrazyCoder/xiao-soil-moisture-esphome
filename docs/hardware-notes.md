@@ -132,8 +132,8 @@ Where to get it:
 - [JLCPCB C393942](https://jlcpcb.com/partdetail/SHOUHAN-TS24CA/C393942) — the
   same part, if you order an assembled board.
 - [A lot of 20 on AliExpress](https://www.aliexpress.us/item/3256810300185336.html)
-  — often easier for one repair. The author of this repository recommends this
-  seller. Nobody has verified the page for you, so check it yourself.
+  — often the easiest source for a single repair. If the link is dead, search
+  AliExpress for "TS24CA".
 
 Order more than one. The part costs very little, and the failure repeats on any
 board that gets water on the switch.
