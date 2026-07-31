@@ -101,8 +101,9 @@ You keep remote calibration. Refer to the calibration commands in the README.
 
 ### Do you need the button back?
 
-Consider this before you order a new switch. The switch is the defect. A board
-with no switch cannot fail in this way again.
+Consider this before you order a new switch. The switch is the leak path in this
+document, and a board with no switch cannot fail at that point again. Water can
+still bridge other points on the board, so this is not a waterproof board.
 
 The button gives you two things: a manual wake, and physical calibration in the
 pot. Both have a remote equivalent. A manual wake saves you a wait of up to
@@ -234,13 +235,26 @@ the switch and the BAT+ pad.
 - the USB-C connector;
 - the u.FL antenna connector;
 - the battery holder contacts;
-- the pin headers between the two boards;
 - the switch itself, if you keep it. If the coating gets inside the switch, the
   switch does not work. If you removed CN4, coat the empty pads instead. They are
   the exact place where the leak starts.
 
+**Coat the castellated joints.** The XIAO is soldered to the carrier board
+through castellated holes, not through a header. Those joints sit close
+together, so water across them shorts pins or makes a new leak path. They are a
+target for the coating, not something to mask.
+
+**You cannot reach both sides of those joints.** The battery compartment sits on
+the back of the carrier board. It covers the opposite side of the same joints.
+Coat the side you can reach, and accept partial cover there. This is a limit of
+the product, not a mistake in the method.
+
 ### 5. Remove the switch
 
-Refer to [The replacement switch](#the-replacement-switch) above. A board with no
-switch cannot fail in this way. This is the permanent answer if you never use
-the button.
+Refer to [The replacement switch](#the-replacement-switch) above. This removes
+the leak path that this document is about, and it is permanent.
+
+**It does not make the board waterproof.** Water bridges many other points: the
+castellated joints, the battery contacts, and any exposed pad. The removal of
+the switch fixes one known fault. It is not protection against water. Outdoors,
+coat the board as well.
