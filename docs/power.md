@@ -146,6 +146,12 @@ PPK2 VIN        unconnected
 AA cell out of the holder        USB cable disconnected
 ```
 
+Only two wires are needed. **VIN stays empty in this mode**, because the PPK2
+supplies the power itself. VIN is the input for ampere-meter mode below.
+
+The PPK2 shares one ground between VIN and VOUT, so **either GND screw works**
+for the return wire.
+
 **Ampere meter.** The PPK2 sits in series with the real AA cell. Use this to
 measure the device on its own battery, at the true cell voltage.
 
