@@ -77,11 +77,40 @@ from a lookup table, not from a linear map.
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Reported % | 100 | 96 | 83 | 57 | 24 | 11 | 3 | 0 |
 
-The table comes from the Duracell MN1500 AA (LR6) 50 mW constant-power
-discharge curve, in the [Duracell product technical data
-sheets](https://duracell.com/techlibrary/product-technical-data-sheets). The
-50 mW curve is a conservative reference for this load. The values are
-normalized to the 0.9 V cutoff of the boost converter.
+### Which curve, and why
+
+Duracell publish more than one AA datasheet, and the discharge curves differ.
+The values above come from one specific chart:
+
+> **Duracell Basic AA (MN1500 / LR6)**, document `MN15EUBS0919`, page 2,
+> "Constant Power" chart, the **50 mW** curve. Get it from the [Duracell product
+> technical data sheets](https://duracell.com/techlibrary/product-technical-data-sheets).
+
+![Duracell Basic AA discharge curves. The 50 mW curve is the red line in the Constant Power chart.](img/duracell-basic-aa-curves.png)
+
+The **Coppertop** AA datasheet (`MN15USCT0122`) is the better known document,
+but it is the wrong one here. Its lightest constant-power curve is 250 mW. The
+Basic datasheet is the only one that publishes a 50 mW curve.
+
+The load decides which curve to use. This device draws about **4.11 mAh each
+day** at the Normal interval. That is an average of 171 µA, or about
+**0.26 mW** at 1.5 V.
+
+| Curve | Load compared to this device |
+|---|---:|
+| Basic AA, 50 mW | 195x heavier |
+| Coppertop AA, 250 mW (its lightest) | 973x heavier |
+
+The 50 mW curve is therefore the closest published curve, but it is still much
+heavier than the real load. This makes the percentage **conservative**. A light
+load gives an alkaline cell more usable service than a heavy load. A real device
+should therefore do at least as well as the table shows.
+
+The shape of the curve matters here, not the capacity. The table maps a voltage
+to a percentage of service, so it is normalized to the 0.9 V cutoff of the boost
+converter. A Coppertop cell holds more charge than a Basic cell. The percentage
+still reads correctly. A heavier load changes the shape of the curve. A
+different cell grade mostly changes its length.
 
 An alkaline cell does not discharge in a straight line. A linear 1.2 V to 1.5 V
 map holds a new cell at 100% for several weeks. It then crosses the whole scale

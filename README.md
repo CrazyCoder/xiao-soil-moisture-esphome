@@ -280,10 +280,16 @@ lookup table:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | Reported % | 100 | 96 | 83 | 57 | 24 | 11 | 3 | 0 |
 
-The table comes from the Duracell MN1500 AA 50 mW discharge curve. The firmware
-samples the voltage once at boot priority 599. That point is after the ADC is
-ready, but before WiFi starts, and after hours of sleep. This removes the
-±10% swings that the radio load caused.
+The table comes from the **Duracell Basic AA (MN1500 / LR6)** datasheet,
+document `MN15EUBS0919`, and its **50 mW** constant-power curve. That is the
+lightest curve Duracell publish for an AA cell, and this device averages about
+0.26 mW. The better known Coppertop datasheet stops at 250 mW, which is almost
+1000 times the real load. Refer to [docs/power.md](docs/power.md#which-curve-and-why)
+for the chart and the full explanation.
+
+The firmware samples the voltage once at boot priority 599. That point is after
+the ADC is ready, but before WiFi starts, and after hours of sleep. This removes
+the ±10% swings that the radio load caused.
 
 The percentage is an estimate, not a fuel gauge. Use it for alerts. Use the raw
 voltage to diagnose one cell. Refer to [docs/power.md](docs/power.md).
@@ -384,8 +390,8 @@ means the USB hold is active. The port is then present, and ESPHome puts the
 chip into download mode itself.
 
 **Hold BOOT only if no port appears.** A device in deep sleep does not enumerate
-its USB interface, so there is no port until it wakes. Hold BOOT while you
-connect the cable. This starts the ROM bootloader, which always enumerates.
+its USB interface. There is no port until it wakes. Hold BOOT while you connect
+the cable. This starts the ROM bootloader, which always enumerates.
 
 ### Method B: manual OTA
 
