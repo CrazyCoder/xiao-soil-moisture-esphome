@@ -1,0 +1,25 @@
+# Sample device: the CN4 button is removed, so the device wakes on its timer only
+#
+# Copy this file for each plant. Give each device a different name and IP
+# address. Flash the first time over USB: hold BOOT while you connect the
+# cable. Later updates go over OTA. Refer to "Updating firmware" in the README.
+
+substitutions:
+  name: "plant-2"
+  friendly_name: "Soil - Plant 2"
+  static_ip: "192.168.1.62"
+
+  # Optional. The defaults are in the base package.
+  # sleep_normal_ms:     "7200000"   #  2 h - detect Almost Dry within 2 h
+  # sleep_almost_dry_ms: "3600000"   #  1 h - detect Dry within 1 h
+  # sleep_dry_ms:       "14400000"   #  4 h - confirm watering within 4 h
+  # external_antenna:       "true"   # "false" if the u.FL antenna is removed
+  # dry_init: "2.75"                 # per-probe calibration seed
+  # wet_init: "1.2"
+
+packages:
+  base: !include packages/xiao-soil-moisture-monitor.base.yaml
+
+# The button package is absent on purpose. Without it, GPIO2 is not an
+# input and is not a deep-sleep wake source. Add the package again if
+# you install a new CN4 button.

@@ -1,0 +1,15 @@
+# ESPHome build cache and downloaded dependencies
+.esphome/
+*.bin
+*.elf
+
+# Real credentials. Only secrets.yaml.example is committed.
+secrets.yaml
+
+# Seeed's factory config is linked from the README, never vendored here.
+*.orig
+
+# Editor and OS leftovers
+*.bak
+.DS_Store
+__pycache__/

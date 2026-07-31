@@ -1,0 +1,878 @@
+# ==================================================================
+# XIAO Soil Moisture Monitor - shared base (include, not a device)
+# Included via `packages:` by xiao-soil-moisture-monitor-{1..6}.yaml
+# Each stub supplies: name, friendly_name, static_ip  (dry/wet optional)
+#
+# Hardware : Seeed XIAO ESP32-C6 + Seeed soil-moisture carrier board
+# Antenna  : EXTERNAL u.FL (GPIO3 low = RF switch on, GPIO14 high = ext)
+# Transport: MQTT, deep-sleep "report-then-sleep" pattern
+# ==================================================================
+
+substitutions:
+  dry_init: "2.75"          # default calibration seeds; override per device
+  wet_init: "1.2"
+  stuck_backoff_ms: "14400000"   # 4h timer-only backoff once the rewake guard trips
+  # Sleep interval per classified state. Override in a device stub to retune.
+  # Cost is computable: wakes/day = 86400 / (interval_ms / 1000).
+  sleep_normal_ms:     "7200000"    #  2 h - detect Almost Dry within 2 h
+  sleep_almost_dry_ms: "3600000"    #  1 h - detect Dry within 1 h
+  sleep_dry_ms:       "14400000"    #  4 h - confirm watering within 4 h
+  # "true" = external u.FL antenna (shipped attached). "false" = built-in
+  # ceramic antenna, for a board with the u.FL antenna removed.
+  external_antenna:       "true"
+
+esphome:
+  name: "${name}"
+  friendly_name: "${friendly_name}"
+  name_add_mac_suffix: false        # stable hostname/topics for static IP + OTA
+  includes:
+    - packages/usb_host_detect.h    # usb_host_present(): SOF-counter USB host check
+    - packages/battery_curve.h      # alkaline_aa_percent(): AA discharge curve
+    - packages/soil_monitor_helpers.h
+  project:
+    name: "xiao.soil-moisture-monitor"
+    # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
+    # Bump for every source change that can be deployed independently.
+    version: "1.2.3"
+  on_boot:
+    # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
+    # before radio startup so battery voltage and die temperature are captured
+    # at the same repeatable, low-load point in every wake.
+    priority: 599
+    then:
+      # --- Rewake guard: count consecutive GPIO (button) wakes ---
+      # A wet/stuck button re-wakes the device the instant it sleeps (level-
+      # triggered wake, wakeup_pin_mode IGNORE re-arms it) -> reboot-report loop
+      # that drains the battery in hours. Timer/cold boots reset the counter.
+      - lambda: |-
+          auto cause = esp_sleep_get_wakeup_cause();
+          if (cause == ESP_SLEEP_WAKEUP_GPIO || cause == ESP_SLEEP_WAKEUP_EXT1) {
+            id(gpio_wake_count) += 1;
+          } else {
+            id(gpio_wake_count) = 0;
+          }
+          ESP_LOGI("rewake_guard", "wake cause=%d, consecutive GPIO wakes=%d", (int) cause, id(gpio_wake_count));
+          if (id(gpio_wake_count) >= 10) {
+            // Only reachable when report cycles keep failing (e.g. wet button
+            // AND no WiFi): the <5 guard in enter_sleep never ran. Bail now.
+            ESP_LOGW("rewake_guard", "%d GPIO re-wakes without a completed cycle - %llds timer-only backoff", id(gpio_wake_count), (long long) (${stuck_backoff_ms} / 1000));
+            esp_sleep_enable_timer_wakeup(${stuck_backoff_ms}ULL * 1000ULL);
+            esp_deep_sleep_start();
+          }
+      # --- XIAO ESP32-C6 antenna select (external u.FL) ---
+      - output.turn_off: gpio_3_output     # GPIO3 LOW  -> enable RF switch (both antennas)
+      - if:
+          condition:
+            lambda: 'return ${external_antenna};'
+          then:
+            - output.turn_on:  gpio_14_output   # GPIO14 HIGH -> external u.FL
+          else:
+            - output.turn_off: gpio_14_output   # GPIO14 LOW  -> built-in ceramic
+      # --- soil-sensor drive / status PWM, on while awake ---
+      - light.turn_on:
+          id: pwm_led
+          brightness: 68%
+      - lambda: 'id(probe_powered) = true;'
+      - script.execute: probe_idle_timeout
+      - component.update: battery_voltage
+      # After a 1-4h deep sleep the die has largely equilibrated with the local
+      # enclosure. Read it before WiFi activity can self-heat the C6.
+      - component.update: mcu_temperature
+
+esp32:
+  board: seeed_xiao_esp32c6
+  flash_size: 4MB
+  framework:
+    type: esp-idf
+
+# ---------- Pin map (silk / GPIO) ----------
+# LED Yellow D10/18   LED Red D9/20   LED Green D8/19   Button D2/2
+# Battery D0/0        PWM out D3/21    Soil D1/1
+output:
+  - platform: gpio
+    pin: GPIO18
+    id: yellow_led_output
+  - platform: gpio
+    pin: GPIO19
+    id: green_led_output
+  - platform: gpio
+    pin: GPIO20
+    id: red_led_output
+  - platform: ledc
+    pin: GPIO21
+    id: pwm_output
+    frequency: 200kHz
+  - platform: gpio
+    pin: GPIO3
+    id: gpio_3_output
+  - platform: gpio
+    pin: GPIO14
+    id: gpio_14_output
+
+light:
+  - platform: binary
+    id: yellow_led
+    output: yellow_led_output
+  - platform: binary
+    id: green_led
+    output: green_led_output
+  - platform: binary
+    id: red_led
+    output: red_led_output
+  - platform: monochromatic
+    output: pwm_output
+    id: pwm_led
+    internal: true
+    default_transition_length: 0s
+
+globals:
+  - id: button_press_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: dry_value
+    type: float
+    restore_value: yes
+    initial_value: '${dry_init}'
+  - id: wet_value
+    type: float
+    restore_value: yes
+    initial_value: '${wet_init}'
+  - id: calibration_dry_candidate
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+  - id: calibration_wet_candidate
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+  - id: calibration_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: probe_powered
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: ref_dry
+    type: float
+    restore_value: no
+    initial_value: '0.23'
+  - id: ref_wet
+    type: float
+    restore_value: no
+    initial_value: '0.58'
+  - id: ota_hold            # set by retained MQTT topic  ${name}/ota = "ON"
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: usb_hold            # true while an enumerated USB host holds us awake
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: gpio_wake_count     # consecutive button/GPIO wakes; reset on timer/cold boot
+    type: int
+    restore_value: yes      # NVS - survives deep sleep
+    initial_value: '0'
+  - id: next_sleep_ms       # mirrors set_sleep_duration for the guarded timer-only path
+    type: int
+    restore_value: no
+    initial_value: '14400000'
+
+script:
+  # The probe is powered before WiFi so it is settled for the normal fast
+  # report. If WiFi/MQTT is unavailable, report_and_sleep never samples it and
+  # the 30 s run-duration cap would otherwise leave it powered the whole time.
+  # A later connection is safe: check_moisture_once restores drive and waits
+  # 500 ms before sampling. Never interrupt an active measurement/calibration.
+  - id: probe_idle_timeout
+    mode: restart
+    then:
+      - delay: 5s
+      - if:
+          condition:
+            lambda: |-
+              return id(probe_powered) &&
+                     !id(calibration_active) &&
+                     !id(check_moisture_once).is_running();
+          then:
+            - light.turn_off: pwm_led
+            - lambda: 'id(probe_powered) = false;'
+            - logger.log:
+                level: WARN
+                format: "No report after 5 seconds - turning off idle probe drive"
+
+  # ----------------- LED feedback -----------------
+  - id: red_led_blink
+    mode: restart
+    then:
+      - repeat:
+          count: 10
+          then:
+            - light.turn_on: red_led
+            - delay: 500ms
+            - light.turn_off: red_led
+            - delay: 500ms
+  - id: green_led_blink
+    mode: restart
+    then:
+      - repeat:
+          count: 10
+          then:
+            - light.turn_on: green_led
+            - delay: 500ms
+            - light.turn_off: green_led
+            - delay: 500ms
+  - id: fast_blink_green
+    then:
+      - repeat:
+          count: 5
+          then:
+            - light.turn_on: green_led
+            - delay: 200ms
+            - light.turn_off: green_led
+            - delay: 200ms
+  - id: fast_blink_red
+    then:
+      - repeat:
+          count: 5
+          then:
+            - light.turn_on: red_led
+            - delay: 200ms
+            - light.turn_off: red_led
+            - delay: 200ms
+  - id: red_status_pulse
+    then:
+      - light.turn_on: red_led
+      - delay: 1000ms
+      - light.turn_off: red_led
+      - delay: 100ms
+  - id: yellow_status_pulse
+    then:
+      - light.turn_on: yellow_led
+      - delay: 1000ms
+      - light.turn_off: yellow_led
+      - delay: 100ms
+  - id: green_status_pulse
+    then:
+      - light.turn_on: green_led
+      - delay: 1000ms
+      - light.turn_off: green_led
+      - delay: 100ms
+
+  # ------- Read moisture, classify, set next sleep, publish -------
+  - id: check_moisture_once
+    mode: single
+    then:
+      - lambda: |-
+          // The probe is already settled on a normal boot. During a manual
+          // check after an OTA/USB hold, restore drive only for this sample.
+          if (!id(probe_powered)) {
+            auto call = id(pwm_led).turn_on();
+            call.set_brightness(0.68f);
+            call.perform();
+            id(probe_powered) = true;
+            delay(500);
+          }
+
+          float sum = 0.0f;
+          bool samples_valid = true;
+          for (int i = 0; i < 5; i++) {
+            id(soil_adc).update();
+            const float sample = id(soil_adc).state;
+            if (std::isfinite(sample)) {
+              sum += sample;
+            } else {
+              samples_valid = false;
+            }
+            delay(100);
+          }
+          const float moisture = samples_valid ? sum / 5.0f : NAN;
+
+          // Never power the probe through WiFi retries or OTA/USB holds.
+          id(pwm_led).turn_off().perform();
+          id(probe_powered) = false;
+
+          if (!std::isfinite(moisture) ||
+              !soil_calibration_valid(id(dry_value), id(wet_value))) {
+            id(soil_sensor_fault).publish_state(true);
+            id(soil_status).publish_state("Sensor Fault");
+            id(next_sleep_ms) = 3600000;  // retry in 1 h, without claiming "Normal"
+            id(deep_sleep_control).set_sleep_duration(id(next_sleep_ms));
+            ESP_LOGE("moisture",
+                     "sensor/calibration fault: raw=%.3f dry=%.3f wet=%.3f",
+                     moisture, id(dry_value), id(wet_value));
+            return;
+          }
+
+          id(soil_sensor).publish_state(moisture);
+          id(soil_sensor_fault).publish_state(false);
+          float diff = id(dry_value) - id(wet_value);
+          const char *status;
+          if (moisture >= (id(dry_value) - diff * id(ref_dry))) {          // drier -> higher V
+            id(red_status_pulse).execute();
+            id(next_sleep_ms) = ${sleep_dry_ms};                  //  4 h    (dry)
+            status = "Dry";
+          } else if (moisture > (id(dry_value) - diff * id(ref_wet))) {
+            id(yellow_status_pulse).execute();
+            id(next_sleep_ms) = ${sleep_almost_dry_ms};           //  1 h    (almost dry)
+            status = "Almost Dry";
+          } else {
+            id(green_status_pulse).execute();
+            id(next_sleep_ms) = ${sleep_normal_ms};               //  2 h    (moist)
+            status = "Normal Moisture";
+          }
+          id(deep_sleep_control).set_sleep_duration(id(next_sleep_ms));
+          id(soil_status).publish_state(status);
+          ESP_LOGI("moisture", "raw=%.3f -> %s", moisture, status);
+
+  - id: publish_calibration_diagnostics
+    then:
+      - lambda: |-
+          id(calibration_dry_sensor).publish_state(id(dry_value));
+          id(calibration_wet_sensor).publish_state(id(wet_value));
+          id(calibration_span_sensor).publish_state(id(dry_value) - id(wet_value));
+
+  - id: publish_device_diagnostics
+    then:
+      - lambda: |-
+          id(firmware_build_sensor).publish_state(soil_firmware_build());
+          id(wake_reason_sensor).publish_state(
+              soil_wake_reason(esp_sleep_get_wakeup_cause()));
+          id(reset_reason_sensor).publish_state(
+              soil_reset_reason(esp_reset_reason()));
+          id(next_sleep_sensor).publish_state(id(next_sleep_ms) / 1000.0f);
+
+  # ------- USB flash hold: stay awake while a USB host is attached -------
+  # SOF-counter check (usb_host_present) sees only enumerated hosts, never
+  # chargers. Called inline from report_and_sleep (normal cycle) and from the
+  # 5s interval (covers broken-WiFi wakes + unplug release). No button involved,
+  # so the wet-button rewake guard is unaffected.
+  - id: usb_hold_update
+    then:
+      - lambda: |-
+          bool present = usb_host_present();
+          if (present && !id(usb_hold)) {
+            id(usb_hold) = true;
+            ESP_LOGI("usb_hold", "USB host detected - holding device awake for flashing");
+            id(deep_sleep_control).prevent_deep_sleep();
+            id(green_led).turn_on().perform();
+          } else if (!present && id(usb_hold)) {
+            id(usb_hold) = false;
+            ESP_LOGI("usb_hold", "USB host disconnected - releasing hold");
+            id(green_led).turn_off().perform();
+            if (!id(ota_hold) && !id(calibration_active)) {
+              id(deep_sleep_control).allow_deep_sleep();
+              id(enter_sleep).execute();
+            }
+          }
+
+  # ---- Guarded sleep: all explicit sleep points go through here ----
+  # >=5 consecutive GPIO wakes = wet/stuck button. Sleep timer-only (button
+  # disabled so the held pin can't instantly re-wake us) for a long backoff
+  # (${stuck_backoff_ms} ms) instead of the normal reading interval: this caps a
+  # shorted button at ~5 WiFi reports per backoff instead of an immediate
+  # boot-report loop. Counts 1..5 still report first, so a real single press
+  # works and the count>2 burst still fires the HA reboot-loop alert. Next timer
+  # wake resets the counter, so it self-heals the moment the short clears.
+  - id: enter_sleep
+    then:
+      - if:
+          condition:
+            lambda: 'return id(calibration_active);'
+          then:
+            - logger.log:
+                format: "Calibration is active - refusing explicit sleep"
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(gpio_wake_count) >= 5;'
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Rapid GPIO re-wakes (wet/stuck button?) - timer-only backoff, button wake disabled"
+                  - lambda: |-
+                      esp_sleep_enable_timer_wakeup(${stuck_backoff_ms}ULL * 1000ULL);
+                      esp_deep_sleep_start();
+                else:
+                  - deep_sleep.enter: deep_sleep_control
+
+  # Retained OTA ON is a convenience, not permission to drain a cell forever.
+  # A valid babysitter refreshes/releases the hold within minutes; if it dies,
+  # this watchdog clears the local hold after 30 minutes and returns to sleep.
+  - id: ota_hold_timeout
+    mode: restart
+    then:
+      - delay: 30min
+      - if:
+          condition:
+            lambda: 'return id(ota_hold);'
+          then:
+            - lambda: 'id(ota_hold) = false;'
+            - logger.log:
+                level: WARN
+                format: "OTA hold timed out after 30 minutes - releasing local hold"
+            - mqtt.publish:
+                topic: "${name}/ota"
+                payload: "OFF"
+                retain: true
+            - delay: 500ms
+            - if:
+                condition:
+                  lambda: 'return !id(usb_hold) && !id(calibration_active);'
+                then:
+                  - deep_sleep.allow: deep_sleep_control
+                  - script.execute: enter_sleep
+
+  # ------------------- Calibration (3x button) -------------------
+  - id: do_calibration
+    mode: single
+    then:
+      - lambda: |-
+          id(calibration_active) = true;
+          if (!id(probe_powered)) {
+            auto call = id(pwm_led).turn_on();
+            call.set_brightness(0.68f);
+            call.perform();
+            id(probe_powered) = true;
+          }
+      - deep_sleep.prevent: deep_sleep_control
+      - logger.log: "Starting calibration"
+      - script.execute: red_led_blink
+      - delay: 10s
+      - script.stop: red_led_blink
+      - lambda: |-
+          float sum = 0.0f;
+          bool valid = true;
+          for (int i = 0; i < 10; i++) {
+            id(soil_adc).update();
+            const float sample = id(soil_adc).state;
+            if (std::isfinite(sample)) {
+              sum += sample;
+            } else {
+              valid = false;
+            }
+            delay(200);
+          }
+          id(calibration_dry_candidate) = valid ? sum / 10.0f : NAN;
+          ESP_LOGI("calibration", "Dry candidate: %.3f V",
+                   id(calibration_dry_candidate));
+      - delay: 3s
+      - script.execute: green_led_blink
+      - delay: 10s
+      - script.stop: green_led_blink
+      - lambda: |-
+          float sum = 0.0f;
+          bool valid = true;
+          for (int i = 0; i < 10; i++) {
+            id(soil_adc).update();
+            const float sample = id(soil_adc).state;
+            if (std::isfinite(sample)) {
+              sum += sample;
+            } else {
+              valid = false;
+            }
+            delay(200);
+          }
+          id(calibration_wet_candidate) = valid ? sum / 10.0f : NAN;
+          ESP_LOGI("calibration", "Wet candidate: %.3f V",
+                   id(calibration_wet_candidate));
+      - delay: 3s
+      - lambda: |-
+          if (soil_calibration_valid(id(calibration_dry_candidate),
+                                     id(calibration_wet_candidate))) {
+            // Commit only after both phases pass validation. A failed second
+            // phase can no longer destroy the last-known-good calibration.
+            id(dry_value) = id(calibration_dry_candidate);
+            id(wet_value) = id(calibration_wet_candidate);
+            id(calibration_result_sensor).publish_state(
+                "Physical calibration saved");
+            id(fast_blink_green).execute();
+            ESP_LOGI("calibration", "saved dry=%.3f V wet=%.3f V",
+                     id(dry_value), id(wet_value));
+          } else {
+            id(calibration_result_sensor).publish_state(
+                "Physical calibration rejected; previous values kept");
+            id(fast_blink_red).execute();
+            ESP_LOGW("calibration",
+                     "rejected dry=%.3f V wet=%.3f V; previous values kept",
+                     id(calibration_dry_candidate),
+                     id(calibration_wet_candidate));
+          }
+      - delay: 3s
+      - script.execute: check_moisture_once
+      - script.wait: check_moisture_once
+      - script.execute: publish_calibration_diagnostics
+      - delay: 1200ms
+      - lambda: 'id(calibration_active) = false;'
+      - if:
+          condition:
+            lambda: 'return !id(ota_hold) && !id(usb_hold);'
+          then:
+            - deep_sleep.allow: deep_sleep_control
+            - script.execute: enter_sleep
+          else:
+            - logger.log: "Calibration complete; OTA/USB hold remains active"
+
+  # --------- Wake -> report -> sleep (driven by MQTT connect) ---------
+  - id: report_and_sleep
+    mode: single
+    then:
+      - delay: 500ms                     # let retained ${name}/ota topic arrive first
+      - if:
+          condition:
+            lambda: 'return !id(calibration_active);'
+          then:
+            - script.execute: check_moisture_once
+            - script.wait: check_moisture_once
+          else:
+            - logger.log: "Physical/remote calibration active - report path will not interrupt it"
+      # The voltage and die temperature were sampled before WiFi initialization.
+      # Re-publish them now that MQTT is connected, then derive battery percentage
+      # from the same voltage sample.
+      - lambda: |-
+          id(battery_voltage).publish_state(id(battery_voltage).state);
+          id(battery_sensor).publish_state(alkaline_aa_percent(id(battery_voltage).state));
+          if (std::isfinite(id(mcu_temperature).state)) {
+            id(mcu_temperature).publish_state(id(mcu_temperature).state);
+          }
+      - component.update: wifi_sig
+      - lambda: 'id(wake_count_sensor).publish_state(id(gpio_wake_count));'
+      - script.execute: publish_calibration_diagnostics
+      - script.execute: publish_device_diagnostics
+      # Boot reached WiFi+MQTT and reported: mark app valid NOW. The bootloader's OTA
+      # rollback otherwise reverts any new image on next wake (validation normally
+      # happens at 60s uptime, but we sleep at ~3s).
+      - lambda: 'id(safe_mode_ctrl).mark_successful();'
+      - delay: 1s                        # let MQTT flush the publishes
+      - script.execute: usb_hold_update  # single-lambda script: completes inline
+      - if:
+          condition:
+            lambda: 'return id(ota_hold) || id(usb_hold) || id(calibration_active);'
+          then:
+            - logger.log: "OTA/USB/calibration hold active - staying awake"
+            - deep_sleep.prevent: deep_sleep_control
+          else:
+            - script.execute: enter_sleep
+
+# USB hold: acquire path for broken-WiFi wakes (report_and_sleep never runs;
+# device stays up to the 30s run_duration cap -> ~5 checks) and release path
+# after unplug (frozen SOF counter -> sleep instead of draining the battery).
+# Normal 2.8s battery wakes end before the first tick fires.
+binary_sensor:
+  - platform: template
+    id: soil_sensor_fault
+    name: "Soil sensor fault"
+    device_class: problem
+    entity_category: diagnostic
+    # Each wake creates a fresh template sensor. Without this, ESPHome accepts
+    # the first healthy OFF state internally but suppresses its MQTT callback,
+    # leaving both the discovered entity and HA's fixed-ID monitor "unknown".
+    trigger_on_initial_state: true
+
+interval:
+  - interval: 5s
+    then:
+      - script.execute: usb_hold_update
+
+deep_sleep:
+  id: deep_sleep_control
+  run_duration: 30s           # SAFETY CAP only - normal path sleeps early via report_and_sleep
+  sleep_duration: 8h          # default; overridden per reading
+
+sensor:
+  - platform: adc
+    id: soil_adc
+    pin: GPIO1
+    internal: true
+    attenuation: 12db
+    samples: 8                # hardware oversampling in one update()
+    update_interval: never    # manual .update() only
+
+  # One published value per wake: the mean of five ADC updates (40 hardware
+  # conversions total). Keeping the raw ADC internal avoids five MQTT states
+  # while preserving averaging and a stable timestamp for drain monitoring.
+  - platform: template
+    id: soil_sensor
+    name: "Soil moisture (raw)"
+    state_class: measurement
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+
+  # Raw cell voltage, sampled once at boot before WiFi starts and re-published
+  # after MQTT connects. Percentage is derived and saturates at both ends, so
+  # trend volts to see the cell aging.
+  - platform: adc
+    id: battery_voltage
+    pin: GPIO0
+    name: "Battery voltage"
+    device_class: voltage
+    state_class: measurement
+    entity_category: diagnostic
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    attenuation: 12db
+    samples: 4
+    update_interval: never
+
+  # ESP32-C6 die temperature, sampled once immediately after a long deep sleep
+  # and before WiFi. It is a local temperature trend/correlation input, not a
+  # calibrated ambient-temperature measurement.
+  - platform: internal_temperature
+    id: mcu_temperature
+    name: "MCU temperature"
+    device_class: temperature
+    state_class: measurement
+    entity_category: diagnostic
+    accuracy_decimals: 1
+    update_interval: never
+
+  # Derived from the voltage via the alkaline AA curve in packages/battery_curve.h.
+  # Keeps the "Battery" name (MQTT topic + HA entity) from the old ADC sensor.
+  - platform: template
+    id: battery_sensor
+    name: "Battery"
+    device_class: battery
+    state_class: measurement
+    entity_category: diagnostic
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: never    # published from report_and_sleep
+
+  - platform: wifi_signal
+    id: wifi_sig
+    name: "WiFi signal"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: wake_count_sensor    # consecutive GPIO wakes, published each report; >2 = re-wake loop
+    name: "Button wake count"
+    entity_category: diagnostic
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:gesture-tap-button
+    update_interval: never   # published from report_and_sleep
+
+  - platform: template
+    id: calibration_dry_sensor
+    name: "Calibration dry"
+    device_class: voltage
+    state_class: measurement
+    entity_category: diagnostic
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+
+  - platform: template
+    id: calibration_wet_sensor
+    name: "Calibration wet"
+    device_class: voltage
+    state_class: measurement
+    entity_category: diagnostic
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+
+  - platform: template
+    id: calibration_span_sensor
+    name: "Calibration span"
+    device_class: voltage
+    state_class: measurement
+    entity_category: diagnostic
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    update_interval: never
+
+  - platform: template
+    id: next_sleep_sensor
+    name: "Next sleep"
+    device_class: duration
+    state_class: measurement
+    entity_category: diagnostic
+    unit_of_measurement: "s"
+    accuracy_decimals: 0
+    update_interval: never
+
+text_sensor:
+  - platform: template
+    id: soil_status
+    name: "Soil Moisture Status"
+    update_interval: never    # published from check_moisture_once
+
+  - platform: template
+    id: calibration_result_sensor
+    name: "Calibration command result"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: firmware_build_sensor
+    name: "Firmware build"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: wake_reason_sensor
+    name: "Wake reason"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: reset_reason_sensor
+    name: "Reset reason"
+    entity_category: diagnostic
+    update_interval: never
+
+logger:                       # keep serial for USB flashing/debug (negligible on a brief wake)
+
+safe_mode:
+  id: safe_mode_ctrl          # referenced by report_and_sleep to validate OTA images pre-sleep
+
+ota:
+  - platform: esphome
+
+mqtt:
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+  discovery_unique_id_generator: mac   # default 'legacy' collides across devices -> HA ignores 2nd+ device
+  enable_on_boot: false       # enabled from wifi.on_connect: skips the client's 5s retry gate
+  reboot_timeout: 0s          # don't reboot if broker is down; run_duration handles it
+  birth_message:              # empty = disabled, so entities stay "available" (retained) while asleep
+  will_message:
+  shutdown_message:           # empty = don't publish "offline" on deep sleep
+  on_connect:
+    - script.execute: report_and_sleep
+  on_message:
+    - topic: "${name}/ota"     # publish retained "ON" here to hold the device awake for OTA
+      then:
+        - if:
+            condition:
+              lambda: 'return x == "ON";'
+            then:
+              - lambda: 'id(ota_hold) = true;'
+              - deep_sleep.prevent: deep_sleep_control
+              - script.execute: ota_hold_timeout
+            else:
+              - if:
+                  condition:
+                    lambda: 'return id(ota_hold);'   # ON -> OFF transition: release and sleep now
+                  then:
+                    - lambda: 'id(ota_hold) = false;'
+                    - script.stop: ota_hold_timeout
+                    - logger.log: "OTA hold released - sleeping"
+                    - if:
+                        condition:
+                          lambda: 'return !id(usb_hold) && !id(calibration_active);'
+                        then:
+                          - deep_sleep.allow: deep_sleep_control
+                          - script.execute: enter_sleep
+
+    # Retained one-shot command, so sleeping/buttonless nodes can be repaired:
+    #   RESET
+    #   SET <dry-volts> <wet-volts>     e.g. SET 2.750 1.200
+    # The device validates, persists, reports the result, then deletes the
+    # retained command by publishing an empty retained payload.
+    - topic: "${name}/calibration/command"
+      then:
+        - if:
+            condition:
+              lambda: 'return !x.empty();'   # ignore our retained-delete echo
+            then:
+              - if:
+                  condition:
+                    lambda: 'return id(calibration_active);'
+                  then:
+                    - lambda: |-
+                        id(calibration_result_sensor).publish_state(
+                            "Rejected: another calibration is active");
+                    - mqtt.publish:
+                        topic: "${name}/calibration/command"
+                        payload: ""
+                        retain: true
+                  else:
+                    - lambda: |-
+                        id(calibration_active) = true;
+                        id(deep_sleep_control).prevent_deep_sleep();
+
+                        std::string command = x;
+                        while (!command.empty() &&
+                               std::isspace(static_cast<unsigned char>(command.front()))) {
+                          command.erase(command.begin());
+                        }
+                        while (!command.empty() &&
+                               std::isspace(static_cast<unsigned char>(command.back()))) {
+                          command.pop_back();
+                        }
+
+                        float dry = NAN;
+                        float wet = NAN;
+                        char extra = '\0';
+                        bool reset = command == "RESET";
+                        bool set = std::sscanf(command.c_str(), "SET %f %f %c",
+                                               &dry, &wet, &extra) == 2;
+                        if (reset) {
+                          dry = ${dry_init};
+                          wet = ${wet_init};
+                        }
+
+                        char result[128];
+                        if ((reset || set) && soil_calibration_valid(dry, wet)) {
+                          id(dry_value) = dry;
+                          id(wet_value) = wet;
+                          std::snprintf(
+                              result, sizeof(result),
+                              "%s saved: dry=%.3f V wet=%.3f V",
+                              reset ? "RESET" : "SET", dry, wet);
+                          ESP_LOGI("calibration", "%s", result);
+                        } else {
+                          std::snprintf(
+                              result, sizeof(result),
+                              "Rejected '%s': use RESET or SET <dry> <wet>; "
+                              "dry-wet must be >=0.150 V within 0..3.3 V",
+                              command.c_str());
+                          ESP_LOGW("calibration", "%s", result);
+                        }
+                        id(calibration_result_sensor).publish_state(result);
+                    # Restored globals flush changed values every second. Wait
+                    # through one full poll before acknowledging and sleeping.
+                    - delay: 1200ms
+                    - script.execute: check_moisture_once
+                    - script.wait: check_moisture_once
+                    - script.execute: publish_calibration_diagnostics
+                    - script.execute: publish_device_diagnostics
+                    - mqtt.publish:
+                        topic: "${name}/calibration/command"
+                        payload: ""
+                        retain: true
+                    - lambda: 'id(calibration_active) = false;'
+                    - if:
+                        condition:
+                          lambda: 'return !id(ota_hold) && !id(usb_hold);'
+                        then:
+                          - deep_sleep.allow: deep_sleep_control
+                          # If report_and_sleep already saw the calibration hold,
+                          # it will not retry sleep itself. Give its publishes
+                          # time to flush, then close this wake explicitly.
+                          - delay: 1500ms
+                          - script.execute: enter_sleep
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  on_connect:
+    - mqtt.enable             # connect immediately now that the network is up
+  fast_connect: true          # skip full scan -> faster wake connect
+  power_save_mode: none       # modem-sleep breaks async MQTT inbound (ota-hold release, LED cmds)
+  reboot_timeout: 0s          # deep-sleep friendly: sleep instead of reboot on wifi loss
+  manual_ip:                  # static -> skip DHCP each wake (battery)
+    static_ip: "${static_ip}"
+    gateway: !secret wifi_gateway
+    subnet: !secret wifi_subnet
+    dns1: !secret wifi_dns
+  ap:
+    ssid: "setup-${name}"
+
+captive_portal:

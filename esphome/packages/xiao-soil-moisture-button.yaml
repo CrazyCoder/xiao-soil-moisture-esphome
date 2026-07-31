@@ -1,0 +1,25 @@
+# Optional hardware package for carriers that still have a working CN4 button.
+# Units with CN4 removed omit this package entirely, so GPIO2 is neither
+# instantiated as an input nor armed as a deep-sleep wake source.
+
+binary_sensor:
+  - platform: gpio
+    pin:
+      number: GPIO2
+      mode: INPUT_PULLUP
+      allow_other_uses: true
+    id: my_button
+    on_press:
+      - lambda: 'id(button_press_count)++;'
+      - delay: 1s                        # wait to catch a triple-press
+      - lambda: |-
+          if (id(button_press_count) == 3)      { id(button_press_count) = 0; id(do_calibration).execute(); }
+          else if (id(button_press_count) == 1) { id(button_press_count) = 0; id(check_moisture_once).execute(); }
+          else                                  { id(button_press_count) = 0; }
+
+deep_sleep:
+  wakeup_pin:
+    number: GPIO2
+    inverted: true
+    allow_other_uses: true
+    mode: INPUT_PULLUP
