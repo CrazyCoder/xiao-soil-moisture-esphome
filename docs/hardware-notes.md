@@ -94,6 +94,61 @@ input nor a wake pin.
 
 You keep remote calibration. Refer to the calibration commands in the README.
 
+### Do you need the button back?
+
+Consider this before you order a new switch. The switch is the defect. A board
+with no switch cannot fail in this way again.
+
+The button gives you two things: a manual wake, and physical calibration in the
+pot. Both have a remote equivalent. A manual wake saves you a wait of up to
+4 hours, and the retained MQTT calibration command works with no button at all.
+
+Fit a new switch if you want the button. Leave CN4 off if you do not.
+
+### The replacement switch
+
+The part is a **SHOU HAN TS24CA** surface-mount tactile switch.
+
+![Two TS24CA switches, seen from the side](img/ts24ca-switch.png)
+
+*Seller photo from the AliExpress page below. The watermark is the seller's.*
+
+| Property | Value |
+|---|---|
+| Size | 4.7 x 1.9 x 3.5 mm |
+| Mounting | SMD |
+| Rating | 12 V, 50 mA |
+| Life | 20,000 cycles |
+| Temperature | -20 °C to +70 °C |
+
+The metal shell has anchor tabs as well as the electrical terminals. Use the pad
+layout in the datasheet, not the photo, when you check the footprint.
+
+Where to get it:
+
+- [LCSC C393942](https://www.lcsc.com/product-detail/C393942.html) — the
+  distributor page, with the
+  [datasheet](https://www.lcsc.com/datasheet/C393942.pdf).
+- [JLCPCB C393942](https://jlcpcb.com/partdetail/SHOUHAN-TS24CA/C393942) — the
+  same part, if you order an assembled board.
+- [A lot of 20 on AliExpress](https://www.aliexpress.us/item/3256810300185336.html)
+  — often easier for one repair. The author of this repository recommends this
+  seller. Nobody has verified the page for you, so check it yourself.
+
+Order more than one. The part costs very little, and the failure repeats on any
+board that gets water on the switch.
+
+After you fit the switch, add the button package again in your device file:
+
+```yaml
+packages:
+  base: !include packages/xiao-soil-moisture-monitor.base.yaml
+  button: !include packages/xiao-soil-moisture-button.yaml
+```
+
+Keep the new switch dry. The defect is in the position of the pads, so a new
+switch in the same place has the same weakness.
+
 **Measure again after 24 to 48 hours at ambient humidity.** Earlier repairs that
 used heat alone became worse again after a day.
 
