@@ -40,6 +40,11 @@ The standby current is 54% of the power budget on a good device. On a damaged
 device it is more than 95%. A leak therefore costs more than any firmware
 change can save.
 
+**Outdoor devices fail sooner.** The product is not designed for outdoor use,
+and the stock enclosure leaves the switch open at the top. Rain, dew and
+condensation reach the switch even if you never spill water on the board. Refer
+to [How to prevent it](#how-to-prevent-it) before you put a device outside.
+
 ## How to detect it
 
 ### Without instruments
@@ -177,5 +182,61 @@ Remove CN4. More alcohol cannot reach the contacts inside the switch.
 
 ## How to prevent it
 
-Water the pot away from the sensor board. The probe must go into the soil, but
-the board and the button must stay dry.
+**This device is not designed for outdoor use.** The stock enclosure leaves the
+switch open at the top, and nothing on the board is sealed. Indoors the only
+threat is water from the can. Outdoors you add rain, dew, high humidity and
+condensation inside the enclosure, so the same defect appears much sooner.
+
+The remedies below go from the simplest to the most durable. Use more than one
+outdoors.
+
+### 1. Water the pot away from the board
+
+Free, and it prevents the common indoor failure. The probe goes into the soil.
+The board and the switch must stay dry.
+
+### 2. Cover the hole above the switch
+
+The switch sits under a hole at the top of the enclosure. Put tape over that
+hole. You lose the button, but you keep the timer wake and the remote
+calibration command.
+
+A plastic bag over the top of the enclosure gives the same protection, and it
+also keeps rain off the seams. It is not elegant, but it works, and you can do
+it today.
+
+### 3. Print a better enclosure
+
+Seeed link 3D case files from the Resources section of the [product
+wiki](https://wiki.seeedstudio.com/xiao_soil_moisture_sensor/), on Printables
+and Thingiverse. The same section has the schematics and the KiCad PCB file.
+
+Modify the model to close the hole above the switch, or add a lip over it. This is the
+best answer if you have a printer, because it fixes the cause instead of the
+symptom.
+
+### 4. Apply conformal coating to the PCB
+
+This is the most durable remedy, and the one to use outdoors. A thin acrylic
+coating stops a water film from making a bridge between the BAT+ pad and the wake pin. Acrylic
+coating also dissolves again in solvent, so a later repair stays possible.
+
+**Mask these parts before you coat the board:**
+
+- the USB-C connector;
+- the u.FL antenna connector;
+- the battery holder contacts;
+- the pin headers between the two boards;
+- the switch itself, if you keep it. If the coating gets inside the switch, the
+  switch does not work. If you removed CN4, coat the empty pads instead. They are the exact
+  place where the leak starts.
+
+**Recalibrate after you coat the probe.** The coating adds a dielectric layer
+over the probe area, so the dry and wet voltages move. Refer to the
+calibration commands in the README.
+
+### 5. Remove the switch
+
+Refer to [The replacement switch](#the-replacement-switch) above. A board with no
+switch cannot fail in this way. This is the permanent answer if you never use
+the button.
