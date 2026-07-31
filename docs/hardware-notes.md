@@ -218,8 +218,9 @@ symptom.
 ### 4. Apply conformal coating to the PCB
 
 This is the most durable remedy, and the one to use outdoors. A thin acrylic
-coating stops a water film from making a bridge between the BAT+ pad and the wake pin. Acrylic
-coating also dissolves again in solvent, so a later repair stays possible.
+coating keeps water off the pads, so a water film cannot bridge the BAT+ pad and
+the wake pin. Acrylic coating also dissolves again in solvent, so a later repair
+stays possible.
 
 **Mask these parts before you coat the board:**
 
