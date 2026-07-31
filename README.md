@@ -138,7 +138,13 @@ different name and a different address. Then connect the board over USB and
 flash it:
 
 ```bash
+# Linux / macOS
 esphome run plant-1.yaml --device /dev/ttyACM0
+```
+
+```powershell
+# Windows (PowerShell). Read "Windows notes" below first.
+esphome run plant-1.yaml --device COM11
 ```
 
 Hold the BOOT button while you connect the cable for the first flash. Later
@@ -146,6 +152,36 @@ updates go over the network. Refer to [How to update the firmware](#how-to-updat
 
 Use `sample-timer-only.yaml` instead if the CN4 button is absent from your
 board.
+
+### Windows notes
+
+**Use PowerShell or the Command Prompt. Do not use Git Bash or an MSYS2 shell.**
+
+ESP-IDF refuses to build under MSYS or MinGW. If `MSYSTEM` is set, or if
+`Git\usr\bin` is on your `PATH`, ESP-IDF detects an MSYS environment and skips
+the link step. **ESPHome then still prints `Successfully compiled program` and
+exits 0.** It produces no binary. A later `upload` flashes an old binary, or it
+fails for a reason that makes no sense.
+
+The warning appears earlier in the output:
+
+```
+MSys/Mingw is no longer supported. Please follow the getting started guide ...
+WARNING flasher_args.json not found, cannot create factory.bin
+WARNING Firmware not found: ...
+```
+
+If you see `Firmware not found` or `ELF not found`, the build failed. Do not
+trust the success line above it.
+
+To find your COM port:
+
+```powershell
+Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Description
+```
+
+The XIAO ESP32-C6 uses the native USB-Serial-JTAG interface. It appears as
+`COMn` on Windows, and as `/dev/ttyACM0` on Linux.
 
 ## Power design
 
@@ -325,10 +361,12 @@ This is the simplest method. It is also the only method for the first flash from
 the stock firmware. Hold BOOT while you connect the cable.
 
 ```bash
-esphome run plant-1.yaml --device /dev/ttyACM0
+esphome run plant-1.yaml --device /dev/ttyACM0    # Linux / macOS
+esphome run plant-1.yaml --device COM11           # Windows
 ```
 
-Connect the cable, wait for the green LED, flash the device, disconnect.
+Connect the cable, wait for the green LED, flash the device, disconnect. On
+Windows, read [Windows notes](#windows-notes) first.
 
 ### Method B: manual OTA
 

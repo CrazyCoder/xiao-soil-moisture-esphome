@@ -130,12 +130,22 @@ uv run tools/ppk2-monitor.py diag --label "plant 1"
 A full capture and analysis:
 
 ```bash
+# Linux / macOS
 uv run tools/ppk2-monitor.py measure --volt 1800 --seconds 90 --settle 45 --csv /tmp/plant1.csv
 uv run tools/analyze-capture.py /tmp/plant1.csv 1800
 ```
 
+```powershell
+# Windows
+uv run tools/ppk2-monitor.py measure --volt 1800 --seconds 90 --settle 45 --csv c:/temp/plant1.csv
+uv run tools/analyze-capture.py c:/temp/plant1.csv 1800
+```
+
 Write the CSV outside the repository. At 100,000 samples per second, a 90 second
 capture is about 170 MB.
+
+Both scripts run on Windows, Linux and macOS. They need no serial port name,
+because the PPK2 uses its own USB interface.
 
 ### Verdict bands
 
