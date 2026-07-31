@@ -14,27 +14,74 @@ Water and dissolved salts then make a leakage path.
 
 Look at the top of the carrier board, at the white tactile switch. The corrosion
 spreads from the switch over the BAT+ pad, and it covers the `+` of the
-silkscreen. The result is a constant standby current. It is **not** a reboot
-loop, and the wake path stays healthy.
+silkscreen.
+
+The result is one of four faults. Most of them are a constant standby current,
+and the wake path stays healthy. One of them makes the switch look pressed, so
+the device wakes again at every sleep. Refer to
+[Four failure modes](#four-failure-modes) below.
 
 > **The damage is often invisible.** The photo shows an obvious case. Water also
 > gets inside the switch body, where you cannot see it. A board that looks
 > perfect can still leak. **Do not clear a board by a visual check. Measure it.**
 
-### Two failure modes
+### The circuit
 
-The resistance of the leakage path decides which fault you get:
+The Seeed schematic and the KiCad netlist give this branch:
 
-| Leakage resistance | Effect |
-|---|---|
-| Low | The switch looks pressed. The device wakes again at every sleep. |
-| Higher | No false wakes, but a constant standby current empties the cell. |
+```text
+3V3 ── R6 4.7 kΩ ── A2_D2 / GPIO2 ── CN4 switch ── GND
+                          │
+                         ED1  (ESD device)
+                          │
+                         GND
+```
 
-A low resistance path is the more visible fault, because `button wake count`
-increases and the battery falls in hours. A higher resistance path is quiet: the
-device reports normally, and only the battery life shows the problem.
+GPIO2 is the button input and the deep-sleep wake pin. The button pulls GPIO2 to
+ground.
 
-The same repair fixes both faults, because both come from the same place.
+**R6 is a physical part on the carrier board.** No firmware change disconnects
+it. The internal pull-up of the chip is therefore not the limit here.
+
+Two numbers follow from that branch, and they explain every fault below:
+
+- A full short from GPIO2 to ground draws `3.3 V / 4.7 kΩ` = **0.70 mA** from the
+  3.3 V rail.
+- GPIO2 reads LOW below about 0.25 x 3.3 V. R6 and the leak form a divider, so a
+  leak below about **1.6 kΩ** looks like a pressed button.
+
+### Four failure modes
+
+| # | Leak path | Looks pressed? | Symptom | Electrical signature |
+|---|---|---|---|---|
+| 1 | GPIO2 to GND, below ~1.6 kΩ | **Yes** | False wakes, then the rewake guard. Hours of life. | Constant power, up to 0.70 mA on the 3.3 V rail |
+| 2 | GPIO2 to GND, above ~1.6 kΩ | No | Silent standby drain | Constant power, falls as the leak resistance rises |
+| 3 | BAT+ to GPIO2 (the 0.54 mm gap) | No | Silent standby drain | Constant power, up to 0.38 mA |
+| 4 | BAT+ to BAT- (GND) | No | Direct drain of the cell | **Constant resistance** |
+
+Modes 1 to 3 all load the **3.3 V rail**, so they take constant power. Mode 4
+sits across the cell, before the boost converter, so it takes constant
+resistance. The measurement in [power.md](power.md) separates them: sweep the
+supply voltage and watch whether the power stays flat or the current falls.
+
+Mode 3 is the path that the 0.54 mm gap creates. A bridge there holds GPIO2 near
+the cell voltage of 1.5 V. That is above the logic threshold, so the button
+never looks pressed, and current flows from the 3.3 V rail through R6 into the
+cell.
+
+Mode 1 is the only mode that `button wake count` reports. Modes 2, 3 and 4 are
+silent, and only the battery life shows them.
+
+**The same repair fixes modes 1, 2 and 3**, because all three end at the switch
+or at its pads. ED1 sits on the same net, so it is a second possible source of
+modes 1 and 2.
+
+A measured example: unit 6 drew 1.45 mA at 1.8 V before repair. That implies a
+leak of roughly 250 Ω to 540 Ω, which is close to a dead short across the
+switch. CN4 removal returned it to the 92 µA baseline.
+
+The mode table is a model with strong numerical support. Nobody has confirmed
+the exact path inside each damaged unit.
 
 The standby current is 54% of the power budget on a good device. On a damaged
 device it is more than 95%. A leak therefore costs more than any firmware
@@ -72,12 +119,22 @@ peaks are the burst events.
 
 ### The diagnostic signature
 
-The leak takes **constant power** across the supply voltage. The current
-increases as the voltage falls, but the power stays within about 10%.
+Sweep the supply voltage and watch the power. This separates the modes in the
+table above.
 
-This tells you where the leak is. A resistive path across BAT+ behaves in the
-opposite way, because its current falls with the voltage. Constant power puts
-the leak after the boost converter, on the 3.3 V rail.
+**Constant power** means modes 1 to 3. The current increases as the voltage
+falls, but the power stays within about 10%. A constant-power load at the input
+is a fixed load on the regulated output. The leak is therefore after the boost
+converter, on the 3.3 V rail. Every unit measured in this fleet behaved this
+way.
+
+**Constant resistance** means mode 4. The current falls with the voltage,
+because the leak sits across the cell itself. Unit 4 was tested against this
+specifically, despite visible corrosion between BAT+ and the switch, and it did
+not fit.
+
+Add `button wake count` to narrow it further. Mode 1 raises it. Modes 2, 3 and 4
+leave it at zero.
 
 ## How to repair it
 
