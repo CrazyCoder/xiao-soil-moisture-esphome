@@ -147,8 +147,12 @@ esphome run plant-1.yaml --device /dev/ttyACM0
 esphome run plant-1.yaml --device COM11
 ```
 
-Hold the BOOT button while you connect the cable for the first flash. Later
-updates go over the network. Refer to [How to update the firmware](#how-to-update-the-firmware).
+Wait for the green LED before you flash. The LED means the device is awake and
+its port is present. Hold BOOT while you connect the cable only if no port
+appears, because a device in deep sleep does not enumerate its USB interface.
+
+Later updates go over the network. Refer to [How to update the
+firmware](#how-to-update-the-firmware).
 
 Use `sample-timer-only.yaml` instead if the CN4 button is absent from your
 board.
@@ -363,15 +367,25 @@ inside a 2.8 second window.
 ### Method A: USB
 
 This is the simplest method. It is also the only method for the first flash from
-the stock firmware. Hold BOOT while you connect the cable.
+the stock firmware.
+
+Connect the cable, wait for the green LED, then flash the device:
 
 ```bash
 esphome run plant-1.yaml --device /dev/ttyACM0    # Linux / macOS
 esphome run plant-1.yaml --device COM11           # Windows
 ```
 
-Connect the cable, wait for the green LED, flash the device, disconnect. On
-Windows, read [Windows notes](#windows-notes) first.
+Disconnect the cable when the flash is complete. The device then returns to its
+schedule. On Windows, read [Windows notes](#windows-notes) first.
+
+**You do not need the BOOT button while the device is awake.** The green LED
+means the USB hold is active. The port is then present, and ESPHome puts the
+chip into download mode itself.
+
+**Hold BOOT only if no port appears.** A device in deep sleep does not enumerate
+its USB interface, so there is no port until it wakes. Hold BOOT while you
+connect the cable. This starts the ROM bootloader, which always enumerates.
 
 ### Method B: manual OTA
 
