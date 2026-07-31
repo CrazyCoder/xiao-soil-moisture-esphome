@@ -123,18 +123,47 @@ an error. Use the percentage for alerts. Use the raw voltage for a diagnosis.
 
 ## How to measure your own device
 
-### Connections
+### Where to connect
 
-Use source-meter mode. The PPK2 supplies the board.
+**Connect to the AA holder terminals.** That is the input of the boost
+converter, at about 1.5 V. It is where the standby current of the fleet shows
+up, and it measures everything the cell must supply.
+
+> **Never apply 3.3 V or 3.7 V to those terminals.** They are the boost input,
+> not a battery input for a lithium cell. A fresh LR6 gives 1.6 V, and the node
+> runs down to about 0.9 V. A higher voltage can destroy the converter.
+
+There are two ways to wire it. Use source-meter mode unless you need the real
+cell in the circuit.
+
+**Source meter (default).** The PPK2 supplies the board and measures it.
 
 ```
-PPK2 VOUT --> AA holder +        PPK2 GND --> AA holder -
-VIN unconnected                  AA cell removed from the holder
+PPK2 VOUT  ──►  AA holder +
+PPK2 GND   ──►  AA holder -
+PPK2 VIN        unconnected
+
+AA cell out of the holder        USB cable disconnected
+```
+
+**Ampere meter.** The PPK2 sits in series with the real AA cell. Use this to
+measure the device on its own battery, at the true cell voltage.
+
+```
+AA cell +  ──►  PPK2 VIN
+PPK2 VOUT  ──►  AA holder +
+AA cell -  ──►  PPK2 GND  ◄──  AA holder -
+
 USB cable disconnected
 ```
 
-The USB cable must stay disconnected. The firmware holds the device awake while
-a USB host is present, so a connected cable hides the standby current.
+In ampere-meter mode the PPK2 does not set the voltage, so `--volt` is ignored.
+The brownout problem below then applies at the true cell voltage, so a healthy
+cell is required.
+
+**The USB cable must stay disconnected in both modes.** The firmware holds the
+device awake while a USB host is present. A connected cable therefore hides the
+standby current completely.
 
 ### Supply 1800 mV, not 1500 mV
 
