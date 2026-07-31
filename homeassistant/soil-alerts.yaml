@@ -58,6 +58,32 @@
           {{ trigger.to_state.state }} button wakes in a row. The button is
           probably wet. Dry the board and check for corrosion at CN4.
 
+# The firmware reports a fault when the ADC read fails, or when the saved
+# calibration is invalid. Without this state the reading would fall through to
+# "Normal Moisture", which is what the stock firmware does. A green dashboard
+# over a dead sensor is the worst outcome, so alert on it.
+#
+# The device retries after one hour. The entity returns to "off" by itself once
+# a valid reading arrives.
+- alias: "Soil - sensor fault"
+  id: soil_sensor_fault
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: state
+      entity_id:
+        - binary_sensor.soil_plant_1_soil_sensor_fault
+        - binary_sensor.soil_plant_2_soil_sensor_fault
+      to: "on"
+  actions:
+    - action: notify.YOUR_NOTIFY_SERVICE
+      data:
+        title: "Soil sensor fault"
+        message: >-
+          {{ trigger.to_state.attributes.friendly_name }} reports invalid data.
+          Check the probe connection and the calibration. The device retries in
+          one hour.
+
 - alias: "Soil - plant needs water"
   id: soil_needs_water
   mode: queued

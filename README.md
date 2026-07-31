@@ -14,6 +14,7 @@ problem: battery life.
 | Address | DHCP | static IP + `fast_connect` |
 | Sleep schedule | 8 h / 1 h / 15 min | 2 h / 1 h / 4 h |
 | Battery percentage | linear 1.2–1.5 V, every 5 s | alkaline curve, sampled before WiFi |
+| Bad sensor data | reported as `Normal Moisture` | `Sensor Fault` state, retry in 1 h |
 | Wake energy | — | **0.158 mAh**, measured |
 | Standby current | — | **92 µA**, measured |
 | Life on one AA | about 1 month, observed | **about 600 days** at the Normal interval |
@@ -340,6 +341,43 @@ the ±10% swings that the radio load caused.
 The percentage is an estimate, not a fuel gauge. Use it for alerts. Use the raw
 voltage to diagnose one cell. Refer to [docs/power.md](docs/power.md).
 
+## Fault detection
+
+The stock firmware cannot report a broken sensor. Its classification ends with
+an `else` branch that returns `Normal Moisture`:
+
+```cpp
+if (value >= ...)       return "Dry";
+else if (value > ...)   return "Almost Dry";
+else                    return "Normal Moisture";     // every failure lands here
+```
+
+Two failures land in that `else`:
+
+- **A failed ADC read gives NaN.** In C++ every comparison with NaN is false, so
+  the code reaches the `else`.
+- **Invalid calibration gives a meaningless threshold**, and the comparisons
+  fail in the same way.
+
+The device then reports a healthy plant and sleeps for 8 hours. The dashboard
+stays green while the plant dries out. This is the worst failure a moisture
+sensor can have, because it looks exactly like success.
+
+This firmware checks the reading and the calibration first. Bad data becomes a
+separate **`Sensor Fault`** state, and the device retries after one hour instead
+of its normal interval. The `Soil sensor fault` entity uses
+`device_class: problem`, so Home Assistant shows it as a problem, and the sample
+alerts report it.
+
+A real example from this fleet: one unit held a saved calibration of dry
+2.590 V and wet 2.591 V. The span was -0.001 V, so dry was below wet, which is
+impossible. The stock logic returns `Normal Moisture` for that state. This
+firmware reported a fault instead, and a retained calibration command repaired
+the unit at its next wake.
+
+Calibration is protected in the same way. A failed calibration keeps the last
+known good pair, so a bad second phase cannot overwrite good values.
+
 ## Calibration
 
 Calibration sets the dry voltage and the wet voltage of your probe. Both values
@@ -396,8 +434,8 @@ last operation. It is not a health sensor.
 
 Sample alerts are in
 [`homeassistant/soil-alerts.yaml`](homeassistant/soil-alerts.yaml): battery low,
-button wet or stuck, plant needs water, and sensor silent. They use a
-placeholder notify service, so they work with any notification method.
+button wet or stuck, sensor fault, plant needs water, and sensor silent. They
+use a placeholder notify service, so they work with any notification method.
 
 ## How to update the firmware
 
