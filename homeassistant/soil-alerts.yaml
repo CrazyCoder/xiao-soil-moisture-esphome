@@ -1,0 +1,122 @@
+# Sample Home Assistant alerts for the XIAO soil moisture sensors.
+#
+# This file is a starting point, not a drop-in. Before you use it:
+#
+#   1. Replace every `notify.YOUR_NOTIFY_SERVICE` with your own notify service
+#      or notify entity. Examples: notify.mobile_app_<your_phone>,
+#      notify.persistent_notification.
+#   2. Replace the entity ids with your own. Home Assistant builds them from the
+#      friendly name of each device. A device named "Soil - Plant 1" gives
+#      `sensor.soil_plant_1_battery`, and so on.
+#   3. Add one entity id per plant to each list.
+#
+# These samples need no helper entities, so you can paste them into
+# automations.yaml and reload.
+#
+# To use the file directly, add this line to configuration.yaml:
+#   automation soil: !include homeassistant/soil-alerts.yaml
+
+- alias: "Soil - battery low"
+  id: soil_battery_low
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: numeric_state
+      entity_id:
+        - sensor.soil_plant_1_battery
+        - sensor.soil_plant_2_battery
+      below: 15
+  actions:
+    - action: notify.YOUR_NOTIFY_SERVICE
+      data:
+        title: "Soil sensor battery low"
+        message: >-
+          {{ trigger.to_state.attributes.friendly_name }} is at
+          {{ trigger.to_state.state }}%. Replace the AA cell.
+
+# The button is also the deep-sleep wake pin. Water on the button wakes the
+# device again immediately after each sleep, which empties the cell in hours.
+# The firmware limits the damage: after 5 button wakes in a row it takes a
+# timer-only sleep. A count above 2 still means the button is wet or stuck.
+# Refer to docs/hardware-notes.md.
+- alias: "Soil - button wet or stuck"
+  id: soil_button_stuck
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: numeric_state
+      entity_id:
+        - sensor.soil_plant_1_button_wake_count
+        - sensor.soil_plant_2_button_wake_count
+      above: 2
+  actions:
+    - action: notify.YOUR_NOTIFY_SERVICE
+      data:
+        title: "Soil sensor button stuck"
+        message: >-
+          {{ trigger.to_state.attributes.friendly_name }} reports
+          {{ trigger.to_state.state }} button wakes in a row. The button is
+          probably wet. Dry the board and check for corrosion at CN4.
+
+- alias: "Soil - plant needs water"
+  id: soil_needs_water
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: state
+      entity_id:
+        - sensor.soil_plant_1_soil_moisture_status
+        - sensor.soil_plant_2_soil_moisture_status
+      to:
+        - "Almost Dry"
+        - "Dry"
+  actions:
+    - action: notify.YOUR_NOTIFY_SERVICE
+      data:
+        title: "Plant needs water"
+        message: >-
+          {{ trigger.to_state.attributes.friendly_name }} is
+          {{ trigger.to_state.state }}.
+
+# A device that cannot reach WiFi or the broker caps its awake time and sleeps
+# again. That is correct behaviour, but it is silent, and the retained MQTT
+# values keep the last good reading on the dashboard. A failed wake also costs
+# about 0.94 mAh instead of 0.158 mAh. This alert makes the failure visible.
+#
+# 12 hours is three times the longest default sleep interval of 4 hours, so one
+# missed report does not raise an alert. Change this value if you change the
+# sleep intervals.
+#
+# Two limits of this sample:
+#   - A Home Assistant restart resets `last_changed`, so the 12 hour timer
+#     starts again. An already silent sensor needs another 12 hours.
+#   - `expire_after` is deliberately not used. It marks the entity
+#     `unavailable`, which removes the retained last reading that MQTT was
+#     chosen to keep.
+#
+# The raw voltage entity is correct here. It changes at every report. The
+# status entity can stay at "Normal Moisture" for days on a healthy device.
+- alias: "Soil - sensor silent"
+  id: soil_sensor_silent
+  mode: queued
+  max: 10
+  triggers:
+    - trigger: template
+      id: plant_1
+      value_template: >-
+        {{ states.sensor.soil_plant_1_soil_moisture_raw is not none
+           and now() - states.sensor.soil_plant_1_soil_moisture_raw.last_changed
+               > timedelta(hours=12) }}
+    - trigger: template
+      id: plant_2
+      value_template: >-
+        {{ states.sensor.soil_plant_2_soil_moisture_raw is not none
+           and now() - states.sensor.soil_plant_2_soil_moisture_raw.last_changed
+               > timedelta(hours=12) }}
+  actions:
+    - action: notify.YOUR_NOTIFY_SERVICE
+      data:
+        title: "Soil sensor silent"
+        message: >-
+          {{ trigger.id }} sent no report for more than 12 hours. Check the
+          WiFi signal, the MQTT broker and the battery.
