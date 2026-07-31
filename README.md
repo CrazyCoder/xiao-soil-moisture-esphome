@@ -251,9 +251,55 @@ Calculate the cost first: `wakes per day = 86400 / (interval_ms / 1000)`. Each
 wake costs 0.158 mAh. The stock 15 minute Dry interval is 96 wakes each day,
 and it spends the charge after the alert has already gone out.
 
-There is no runtime command for these values yet. A change needs a new build
-and an OTA update. A retained MQTT command is planned, and it will follow the
-pattern of the calibration command below.
+### Why the device has no clock
+
+The device does not know the time of day. This is deliberate.
+
+A clock needs a time source and a synchronisation at each wake. Both cost awake
+time, and awake time is the whole power budget. The device must also hold the
+time across deep sleep.
+
+The gain is small. A plant does not dry to a schedule, and the interval logic
+above already reacts to the measurement itself. A fixed 2.8 second wake with no
+clock is a better trade than a shorter interval at night.
+
+### What is planned
+
+Neither of these is in the firmware today. A change to an interval needs a new
+build and an OTA update.
+
+**1. Remote interval settings.** A retained MQTT command will set the three
+fallback intervals with no new build:
+
+```sh
+mosquitto_pub ... -r -t 'plant-1/sleep_schedule/command' -m 'SET 7200 3600 14400'
+```
+
+It follows the pattern of the calibration command below. The device validates
+all three values together, rejects a bad command, and clears the retained
+command itself.
+
+**2. A sleep time from Home Assistant.** Home Assistant holds the full history
+of each plant, with accurate timestamps. It can estimate how fast each pot
+dries. It can therefore choose a better next sleep than a fixed table can, and
+it can do that per plant.
+
+The device would publish its reading, wait a short time for a live MQTT answer,
+and accept one bounded duration for that wake only. **This is a message, not a
+firmware update.**
+
+Safety rules for that design:
+
+- The answer is **not retained**. A stale duration cannot replay after a
+  restart of the broker, the device or Home Assistant.
+- The device clamps the value to a safe minimum and maximum. An accidental one
+  second interval cannot empty the cell.
+- On a timeout, a bad value, or no answer, the device uses its own saved
+  schedule.
+- The device publishes the applied duration and the reason for it, so you can
+  audit the decision.
+
+The device therefore stays autonomous. Home Assistant only advises it.
 
 ## The battery percentage
 
