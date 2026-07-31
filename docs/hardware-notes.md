@@ -15,6 +15,25 @@ Water and dissolved salts then make a leakage path.
 The photo shows the corrosion across that gap. The result is a constant standby
 current. It is **not** a reboot loop, and the wake path stays healthy.
 
+> **The damage is often invisible.** The photo shows an obvious case. Water also
+> gets inside the switch body, where you cannot see it. A board that looks
+> perfect can still leak. **Do not clear a board by a visual check. Measure it.**
+
+### Two failure modes
+
+The resistance of the leakage path decides which fault you get:
+
+| Leakage resistance | Effect |
+|---|---|
+| Low | The switch looks pressed. The device wakes again at every sleep. |
+| Higher | No false wakes, but a constant standby current empties the cell. |
+
+A low resistance path is the more visible fault, because `button wake count`
+increases and the battery falls in hours. A higher resistance path is quiet: the
+device reports normally, and only the battery life shows the problem.
+
+The same repair fixes both faults, because both come from the same place.
+
 The standby current is 54% of the power budget on a good device. On a damaged
 device it is more than 95%. A leak therefore costs more than any firmware
 change can save.
@@ -35,7 +54,8 @@ The sample alerts in `homeassistant/soil-alerts.yaml` report both conditions.
 ### With a PPK2
 
 Measure the standby current at 1800 mV. Refer to [power.md](power.md) for the
-connections and the commands.
+connections and the commands. This is the only reliable test, because the
+damage inside the switch body is not visible.
 
 ![PPK2 standby trace of a damaged unit](img/ppk2-standby-damaged.png)
 
@@ -94,6 +114,9 @@ The grade compares the measured standby current to the 92 µA baseline.
 | 2x to 4x | Marginal | Clean the board |
 | 4x to 10x | Damaged | Clean the board, then remove CN4 |
 | 10x or more | Severely damaged | Remove CN4 |
+
+A clean board that still fails this test has damage inside the switch body.
+Remove CN4. More alcohol cannot reach the contacts inside the switch.
 
 ## How to prevent it
 
