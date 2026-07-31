@@ -12,8 +12,10 @@ Water and dissolved salts then make a leakage path.
 
 ![Corrosion between the BAT+ pad and the CN4 button](img/board-damage-cn4.jpg)
 
-The photo shows the corrosion across that gap. The result is a constant standby
-current. It is **not** a reboot loop, and the wake path stays healthy.
+Look at the top of the carrier board, at the white tactile switch. The corrosion
+spreads from the switch over the BAT+ pad, and it covers the `+` of the
+silkscreen. The result is a constant standby current. It is **not** a reboot
+loop, and the wake path stays healthy.
 
 > **The damage is often invisible.** The photo shows an obvious case. Water also
 > gets inside the switch body, where you cannot see it. A board that looks
