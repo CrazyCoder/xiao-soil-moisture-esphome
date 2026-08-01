@@ -10,7 +10,7 @@ problem: battery life.
 | | Stock firmware | This firmware |
 |---|---|---|
 | Awake time per wake | `run_duration: 120s` | **~2.8 s** |
-| Transport | native API | MQTT, retained topics |
+| Transport | native API | MQTT, retained topics ([why](#why-this-firmware-uses-mqtt)) |
 | Address | DHCP | static IP + `fast_connect` |
 | Sleep schedule | 8 h / 1 h / 15 min | 2 h / 1 h / 4 h |
 | Battery percentage | linear 1.2–1.5 V, every 5 s | alkaline curve, sampled before WiFi |
@@ -67,26 +67,107 @@ that drives an unconnected u.FL connector is the worst of the three states.
 ## Prerequisite: MQTT
 
 The stock firmware uses the ESPHome native API, which needs no setup. This
-firmware needs an MQTT broker. Many Home Assistant users do not have one yet,
-so this section explains why, and how to add it.
+firmware uses MQTT, which needs a broker. Many Home Assistant users do not have
+one yet, so this section gives the reasons, and then the setup.
 
-### Why MQTT is necessary
+### What the native API does correctly
 
-The native API is a connection that Home Assistant opens **to the device** and
-holds open. That model expects a device which is always reachable. This device
-sleeps for more than 99.9% of the time, which breaks the model in three ways:
+One common belief about deep sleep is wrong, so read this first.
 
-- **Entities become unavailable.** Home Assistant cannot reach a device that
-  sleeps, so it marks the device offline between reports.
-- **Each wake pays for a handshake.** The connection, the encryption and the
-  entity subscriptions must complete before any data moves. This is pure
-  overhead in a 2.8 second budget.
-- **The timing must agree.** The device is present for a moment. Anything that
-  does not listen at that moment misses the report.
+**The native API keeps the last reading on the dashboard while the device
+sleeps.** The `deep_sleep` component sets a `has_deep_sleep` flag in the device
+info. It also sends a disconnect request before each sleep. Home Assistant then
+sees a planned disconnect from a sleepy device, and holds the entities available
+with their last values. The rule is four lines in
+[`esphome/entity.py`](https://github.com/home-assistant/core/blob/dev/homeassistant/components/esphome/entity.py):
 
-MQTT reverses the direction. The device connects to the broker, publishes, and
-sleeps. A **retained** message stays on the broker, so Home Assistant keeps the
-last reading on the dashboard. Nothing must listen at the moment of the report.
+```python
+if self._device_info.has_deep_sleep:
+    # During deep sleep the ESP will not be connectable (by design)
+    # For these cases, show it as available
+    self._attr_available = entry_data.expected_disconnect
+```
+
+Many battery devices use the native API and work well. "The entities go
+unavailable between reports" is therefore **not** a reason to select MQTT. The
+reasons below are.
+
+### Why this firmware uses MQTT
+
+**1. The device must not wait for a server to call it.** This is the strongest
+reason. The native API is a **server on the device**: ESPHome opens port 6053
+and waits, and Home Assistant is the client that connects to it. The ESPHome
+[API documentation](https://esphome.io/components/api/) calls it "the port to
+run the API server on". The Home Assistant [ESPHome
+integration](https://www.home-assistant.io/integrations/esphome/) says that
+"Home Assistant maintains a persistent connection to each ESPHome device".
+
+That model is backwards for a battery device. The device cannot send a reading
+until a client arrives. Each wake therefore holds the radio on for a delay that
+the device does not control, and radio time is the whole power budget. Two more
+details show the same shape: the report must start from an
+`api.on_client_connected` trigger, and the API `reboot_timeout` exists to reboot
+a device that no client called (default 15 minutes).
+
+Home Assistant reconnects fast when mDNS works, and the delay is often small.
+But the device pays for every slow case: a busy or restarted Home Assistant, a
+lost mDNS packet, or a Wi-Fi network that blocks multicast. With MQTT the device
+connects, publishes and sleeps on its own schedule. This project has not
+measured the native API path on this hardware, so no number is given here.
+
+**2. Remote commands need a retained message.** The device is awake for about
+3 seconds, at a moment that it selects. A command must already wait for it. The
+broker holds a retained message, and it delivers that message when the device
+subscribes. This firmware uses the mechanism twice today, for the OTA hold flag
+of the babysitter and for the calibration command. Two more use the same channel
+in the plan: the sleep schedule as a retained command, and a next sleep duration
+from Home Assistant as a live answer. Refer to [What is
+planned](#what-is-planned). The ESPHome [deep sleep
+documentation](https://esphome.io/components/deep_sleep/) recommends the same
+MQTT method for OTA. The native API has no equivalent. A device can import a
+Home Assistant entity state, but only after Home Assistant connects to it, which
+is the wait that point 1 describes.
+
+**3. The dashboard keeps its values after a restart of Home Assistant.** The
+retention rule above is a property of a live connection. A restart clears it,
+because `expected_disconnect` starts at `False` and no state has arrived yet.
+ESPHome entities also do not restore their last value from disk. They therefore
+read `unavailable` until the device wakes again. With the default intervals that
+is a gap of up to 4 hours. Retained MQTT values come back in seconds.
+
+The ESPHome integration has **no option** to change this. The only
+workaround is one trigger-based template sensor per entity, because those do
+restore their state. That is boilerplate for every entity of every device, and
+the entity ids then change.
+
+**4. Retain is a rule of the protocol, not a flag in an integration.** Point 3
+shows that the API rule is delicate. It has also broken before: in Home
+Assistant 2023.4
+([#90923](https://github.com/home-assistant/core/issues/90923)), and again until
+2025.5.2 ([#144970](https://github.com/home-assistant/core/pull/144970)). A
+retained message needs no such logic.
+
+**5. A report can survive a restart of Home Assistant.** This one is minor, and
+it depends on your installation. On Home Assistant OS the broker add-on is a
+separate container, so it stays up while Home Assistant Core restarts. A device
+that wakes in that minute still delivers its reading, and Home Assistant reads
+it when it subscribes again. With the native API that report is lost, and the
+next one comes hours later. Most people restart Home Assistant rarely, so do not
+weigh this heavily.
+
+### When the native API is enough
+
+MQTT is not mandatory. Use the native API instead if all of these are true:
+
+- You want the readings on a dashboard, and nothing more.
+- You accept a gap after each restart of Home Assistant.
+- You do not need remote calibration, the OTA babysitter, or the planned
+  interval commands.
+
+That configuration needs an `api:` block, no `mqtt:` block, and a start of the
+report script from `api.on_client_connected` instead of `wifi.on_connect`. Keep
+mDNS enabled, or Home Assistant falls back to a slow retry timer. This
+repository does not ship a sample for it.
 
 ### How to set it up
 
@@ -105,8 +186,10 @@ documentation](https://esphome.io/components/mqtt/).
 The `mqtt:` block in the base package is tuned for deep sleep:
 
 - `birth_message`, `will_message` and `shutdown_message` are **empty**, which
-  disables them. A will message announces "offline" at every deep sleep. That
-  reintroduces the exact problem MQTT was chosen to solve.
+  disables them. ESPHome sends `online` to `<topic>/status` by default, and asks
+  the broker to send `offline` when the connection drops. Home Assistant reads
+  that topic as availability, so every deep sleep would mark all entities
+  unavailable. Retained values alone survive; availability must be disabled.
 - `enable_on_boot: false`, and `wifi.on_connect` starts MQTT instead. This skips
   the 5 second retry gate of the MQTT client. That gate alone is longer than the
   whole target wake time.
@@ -199,9 +282,11 @@ The levers, in order of effect.
 
 1. **Short awake time.** The device reports and then sleeps, instead of a fixed
    `run_duration`. This is the 40x lever. Everything below is smaller.
-2. **MQTT, not the native API.** Retained topics hold the last value while the
-   device sleeps. There is no handshake and no subscription setup at each wake.
-   MQTT starts from `wifi.on_connect`, which skips a 5 second retry gate.
+2. **MQTT, not the native API.** The device connects to the broker, publishes,
+   and sleeps. With the native API the device must stay awake until Home
+   Assistant opens the connection to it. MQTT also starts from
+   `wifi.on_connect`, which skips a 5 second retry gate. Refer to [Why this
+   firmware uses MQTT](#why-this-firmware-uses-mqtt).
 3. **A static IP with `fast_connect`.** DHCP costs seconds of radio time at
    every wake.
 4. **The supplied u.FL antenna.** Keep it connected. Fewer retries means a
