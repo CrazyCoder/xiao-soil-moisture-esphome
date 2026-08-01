@@ -253,15 +253,19 @@ outdoors.
 Free, and it prevents the common indoor failure. The probe goes into the soil.
 The board and the switch must stay dry.
 
-### 2. Cover the hole above the switch
+### 2. Tape the openings in the enclosure
 
-The switch sits under a hole at the top of the enclosure. Put tape over that
-hole. You lose the button, but you keep the timer wake and the remote
-calibration command.
+The enclosure has two openings that let water reach the board: the hole above
+the switch, at the top, and the USB-C cutout. Put tape over both.
 
-A plastic bag over the top of the enclosure gives the same protection, and it
-also keeps rain off the seams. It is not elegant, but it works, and you can do
-it today.
+**You keep the button.** Press it through the tape. The tape stops water, but it
+does not stop the travel of the switch. Heavy duty tape also works.
+
+Remove the tape from the USB-C cutout only when you flash the device over USB.
+Put it back after.
+
+A plastic bag over the enclosure gives the same protection, and it also keeps
+rain off the seams. It is not elegant, but it works, and you can do it today.
 
 ### 3. Print a better enclosure
 
@@ -269,9 +273,9 @@ Seeed link 3D case files from the Resources section of the [product
 wiki](https://wiki.seeedstudio.com/xiao_soil_moisture_sensor/), on Printables
 and Thingiverse. The same section has the schematics and the KiCad PCB file.
 
-Modify the model to close the hole above the switch, or add a lip over it. This is the
-best answer if you have a printer, because it fixes the cause instead of the
-symptom.
+Modify the model to close the hole above the switch, or add a lip over it. This
+is the best answer if you have a printer, because it fixes the cause instead of
+the symptom.
 
 ### 4. Apply conformal coating to the PCB
 
