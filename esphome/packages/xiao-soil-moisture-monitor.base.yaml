@@ -23,13 +23,27 @@ substitutions:
   # "true" = external u.FL antenna (shipped attached). "false" = built-in
   # ceramic antenna, for a board with the u.FL antenna removed.
   external_antenna:       "true"
+  # A wake that never reaches MQTT is pure waste: the radio retries at full
+  # power and nothing is published. Sleep as soon as a report is clearly not
+  # coming, then back off, so a router/broker outage costs a few wakes a day
+  # instead of a full retry window every interval.
+  report_timeout_ms:      "20000"      # 20 s; a healthy wake reports in ~3 s
+  # Keep the ceiling under whatever staleness alert watches these nodes, so a
+  # node that recovers is not still asleep when the alert fires.
+  max_offline_sleep_ms:   "21600000"   #  6 h backoff ceiling
+  # Absolute cap on one wake. Outranks EVERY hold, including a wedged ota_hold.
+  # Should never fire: ota_hold self-releases at 10 min, usb_hold at 5 min.
+  # Sized as the longest legitimate hold plus an equal margin, so the two
+  # timers cannot race. Worst-case waste if it ever does fire is ~65 mAh,
+  # roughly 3% of an AA, against the whole cell if nothing capped a wedge.
+  max_awake_ms:           "1200000"    # 20 min
 
 esphome:
   name: "${name}"
   friendly_name: "${friendly_name}"
   name_add_mac_suffix: false        # stable hostname/topics for static IP + OTA
   includes:
-    - packages/usb_host_detect.h    # usb_host_present(): SOF-counter USB host check
+    - packages/usb_host_detect.h    # debounced SOF-counter USB host check
     - packages/battery_curve.h      # alkaline_aa_percent(): AA discharge curve
     - packages/soil_monitor_helpers.h
     - packages/soil_settings.h         # generic SET/RESET settings command parser
@@ -37,7 +51,7 @@ esphome:
     name: "xiao.soil-moisture-monitor"
     # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
     # Bump for every source change that can be deployed independently.
-    version: "1.4.0"
+    version: "1.5.2"
   on_boot:
     # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
     # before radio startup so battery voltage and die temperature are captured
@@ -88,6 +102,11 @@ esphome:
       # After a 1-4h deep sleep the die has largely equilibrated with the local
       # enclosure. Read it before WiFi activity can self-heat the C6.
       - component.update: mcu_temperature
+      # Arm both watchdogs before the radio starts, so their timeouts are
+      # measured from a fixed point in every wake. Both use script delays
+      # (set_timeout); an `interval:` would fire at a random offset instead.
+      - script.execute: connect_watchdog
+      - script.execute: awake_watchdog
 
 esp32:
   board: seeed_xiao_esp32c6
@@ -204,6 +223,14 @@ globals:
     type: int
     restore_value: no
     initial_value: '14400000'
+  - id: report_ok           # this wake completed a full MQTT report
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: failed_report_streak  # consecutive wakes that never reached MQTT
+    type: int
+    restore_value: yes      # NVS - the backoff must survive deep sleep
+    initial_value: '0'
 
 script:
   # The probe is powered before WiFi so it is settled for the normal fast
@@ -376,6 +403,10 @@ script:
           id(reset_reason_sensor).publish_state(
               soil_reset_reason(esp_reset_reason()));
           id(next_sleep_sensor).publish_state(id(next_sleep_ms) / 1000.0f);
+          // Republish every report so the retained value is authoritative.
+          // A node that dies holding leaves "ON" retained, which is what makes
+          // a stuck hold visible in HA at all.
+          id(usb_hold_active).publish_state(id(usb_hold));
       - switch.template.publish:
           id: rewake_guard_switch
           state: !lambda 'return id(rewake_guard_enabled);'
@@ -473,28 +504,208 @@ script:
             - lambda: 'id(rewake_guard_discovery_migrated) = true;'
 
   # ------- USB flash hold: stay awake while a USB host is attached -------
-  # SOF-counter check (usb_host_present) sees only enumerated hosts, never
-  # chargers. Called inline from report_and_sleep (normal cycle) and from the
-  # 5s interval (covers broken-WiFi wakes + unplug release). No button involved,
-  # so the wet-button rewake guard is unaffected.
+  # SOF-counter check (usb_host_detect.h) sees only enumerated hosts, never
+  # chargers. Still a single lambda, so it completes inline and the caller can
+  # read id(usb_hold) on the next action.
+  #
+  # ACQUIRE HAPPENS AT EXACTLY TWO POINTS, both once per wake:
+  #   - report_and_sleep, after a successful report (the normal USB/OTA flow)
+  #   - connect_watchdog, immediately before giving up on a failed wake, so a
+  #     node with broken WiFi can still be caught for a USB flash
+  # It used to be reachable from the 5 s interval, so every long broken-WiFi
+  # wake rolled the detector ~5 more times. A single false positive disarms
+  # run_duration (see usb_host_detect.h) and holds the node awake with the
+  # radio powered until the cell is flat. Two strict (3-window) checks per wake
+  # replace ~5 loose single-window ones, and usb_hold_timeout now bounds a
+  # false hit to 5 minutes instead of forever.
+  #
+  # The 5 s interval keeps the RELEASE half, so unplugging still sleeps the
+  # node promptly. When no hold is held the script now returns immediately,
+  # which also removes the old unconditional 20 ms blocking poll every 5 s.
   - id: usb_hold_update
+    parameters:
+      allow_acquire: bool
     then:
       - lambda: |-
-          bool present = usb_host_present();
-          if (present && !id(usb_hold)) {
+          if (!id(usb_hold)) {
+            if (!allow_acquire || !usb_host_present_confirmed()) {
+              return;
+            }
             id(usb_hold) = true;
-            ESP_LOGI("usb_hold", "USB host detected - holding device awake for flashing");
+            ESP_LOGI("usb_hold",
+                     "USB host confirmed - holding device awake for flashing");
             id(deep_sleep_control).prevent_deep_sleep();
             id(green_led).turn_on().perform();
-          } else if (!present && id(usb_hold)) {
-            id(usb_hold) = false;
-            ESP_LOGI("usb_hold", "USB host disconnected - releasing hold");
-            id(green_led).turn_off().perform();
-            if (!id(ota_hold) && !id(calibration_active) && !id(settings_active)) {
-              id(deep_sleep_control).allow_deep_sleep();
-              id(enter_sleep).execute();
-            }
+            id(usb_hold_active).publish_state(true);
+            id(usb_hold_timeout).execute();
+            return;
           }
+          if (usb_host_still_present()) {
+            return;
+          }
+          id(usb_hold) = false;
+          ESP_LOGI("usb_hold", "USB host gone - releasing hold");
+          id(usb_hold_timeout).stop();
+          id(green_led).turn_off().perform();
+          id(usb_hold_active).publish_state(false);
+          if (!id(ota_hold) && !id(calibration_active) && !id(settings_active)) {
+            id(deep_sleep_control).allow_deep_sleep();
+            id(enter_sleep).execute();
+          }
+
+  # A USB hold is bounded exactly like the OTA hold. On a genuine USB session
+  # the re-check renews it indefinitely at zero battery cost - the board is
+  # bus-powered - so flashing and debugging are unaffected. A hold taken on a
+  # false positive costs one interval instead of the whole cell.
+  - id: usb_hold_timeout
+    mode: restart
+    then:
+      - while:
+          condition:
+            lambda: 'return id(usb_hold);'
+          then:
+            - delay: 5min
+            - if:
+                condition:
+                  lambda: 'return id(usb_hold) && !usb_host_present_confirmed();'
+                then:
+                  - lambda: |-
+                      id(usb_hold) = false;
+                      ESP_LOGW("usb_hold",
+                               "USB hold timed out with no live host - releasing");
+                      id(green_led).turn_off().perform();
+                      id(usb_hold_active).publish_state(false);
+                  - if:
+                      condition:
+                        lambda: 'return !id(ota_hold) && !id(calibration_active) && !id(settings_active);'
+                      then:
+                        - deep_sleep.allow: deep_sleep_control
+                        - script.execute: enter_sleep
+
+  # ---- No-WiFi / no-broker escape ----
+  # Without this the only exit from a failed wake is the 30 s run_duration cap,
+  # so a miss costs several times what a successful report costs. Leaving early
+  # cuts that, and the streak backoff stops a multi-hour outage from buying a
+  # full retry window every interval.
+  #
+  # Deliberately skipped while report_and_sleep is running: a slow-but-working
+  # wake must be allowed to finish. If that path itself wedges, run_duration
+  # (no hold) or awake_watchdog (hold) closes the wake.
+  #
+  # ALSO skipped on a pending-verify (post-OTA) boot. That boot is the slowest
+  # the node ever does, and it is the only one where sleeping early is
+  # unrecoverable: an image that never validates is reverted by the bootloader,
+  # so the upload is silently lost and the node returns on the old firmware
+  # with nothing in MQTT to say why. Such a boot falls back to run_duration.
+  # Rollback still works as intended - an image that genuinely cannot report
+  # still reverts.
+  - id: connect_watchdog
+    mode: single
+    then:
+      - delay: ${report_timeout_ms}ms
+      - if:
+          condition:
+            lambda: |-
+              return !id(report_ok) &&
+                     !id(report_and_sleep).is_running() &&
+                     !soil_ota_pending_verify() &&
+                     !id(ota_hold) && !id(usb_hold) &&
+                     !id(calibration_active) && !id(settings_active);
+          then:
+            # Last chance to notice a USB host before giving up: without this a
+            # node with broken WiFi could never be held awake for a flash, which
+            # is precisely when you need to reach it. One strict (3-window)
+            # check per failed wake, bounded by usb_hold_timeout.
+            - script.execute:
+                id: usb_hold_update
+                allow_acquire: true
+            - if:
+                condition:
+                  lambda: 'return id(usb_hold);'
+                then:
+                  - logger.log: "No report, but a USB host is attached - staying awake for flashing"
+                else:
+                  - lambda: |-
+                      id(failed_report_streak) += 1;
+                      const uint32_t backoff = soil_offline_backoff_ms(
+                          ${sleep_normal_ms}, id(failed_report_streak),
+                          ${max_offline_sleep_ms});
+                      // Log the radio state: "wifi=0" is a link/AP problem,
+                      // "wifi=1" points at the broker. Serial only - with no
+                      // MQTT the debug topic goes nowhere either.
+                      ESP_LOGW("offline",
+                               "No MQTT report within %u ms (wifi=%d, streak %d) - sleeping %u ms",
+                               (unsigned) ${report_timeout_ms},
+                               (int) esphome::wifi::global_wifi_component->is_connected(),
+                               id(failed_report_streak), (unsigned) backoff);
+                      id(next_sleep_ms) = (int) backoff;
+                      id(deep_sleep_control).set_sleep_duration(backoff);
+                  - script.execute: enter_sleep
+
+  # ---- Absolute awake cap: the one timer that outranks every hold ----
+  # run_duration is NOT a backstop. It is a one-shot timeout, and if anything
+  # has called prevent_deep_sleep() when it fires, begin_sleep() merely latches
+  # next_enter_deep_sleep_ and loop() spins forever. Every hold therefore needs
+  # its own timeout, and this is the net under all of them.
+  #
+  # A confirmed live USB host defers the cap indefinitely: the board is bus
+  # powered, there is no cell to protect, and force-sleeping would break bench
+  # work and could land mid-flash.
+  #
+  # Deliberately NOT bounded. A bound does not protect: a detector stuck
+  # reporting a host would burn the same awake current every wake and flatten
+  # the cell regardless, so any bound loose enough to keep bench sessions
+  # working is far too loose to save a battery. Firmware cannot resolve this;
+  # the honest guard is the retained usb_hold binary_sensor, which lets the
+  # controller alert a human that a node is holding when it should not be.
+  #
+  # MUST be a script delay, never `interval:`. An ESPHome interval does NOT
+  # first fire one period after boot: scheduler.cpp schedules the first run at
+  # `now + rand(0, min(period/2, MAX_INTERVAL_DELAY))`, MAX_INTERVAL_DELAY =
+  # 5000 ms ("first execution happens immediately after a random smallish
+  # offset"). A long `interval:` therefore fires within 5 s of EVERY boot and
+  # then on its period, so it cannot express "time since boot" - as an interval
+  # this cap would force-sleep a node seconds into a legitimate OTA hold.
+  # set_timeout (a script delay) fires once at the delay, which is what we want.
+  - id: awake_watchdog
+    mode: single
+    then:
+      - while:
+          condition:
+            lambda: 'return true;'
+          then:
+            - delay: ${max_awake_ms}ms
+            - if:
+                condition:
+                  lambda: 'return usb_host_present_confirmed();'
+                then:
+                  - logger.log:
+                      level: WARN
+                      format: "Awake watchdog: live USB host attached (bus powered) - not forcing sleep"
+                else:
+                  - lambda: |-
+                      ESP_LOGE("awake_watchdog",
+                               "Awake far too long (ota=%d usb=%d cal=%d settings=%d) - forcing sleep",
+                               (int) id(ota_hold), (int) id(usb_hold),
+                               (int) id(calibration_active), (int) id(settings_active));
+                      id(ota_hold) = false;
+                      id(usb_hold) = false;
+                      id(calibration_active) = false;
+                      id(settings_active) = false;
+                      id(usb_hold_timeout).stop();
+                      id(green_led).turn_off().perform();
+                      id(usb_hold_active).publish_state(false);
+                      id(deep_sleep_control).allow_deep_sleep();
+                  # Clearing the local ota_hold is not enough: a retained "ON"
+                  # would re-acquire it on the very next wake and loop this
+                  # watchdog. ota_hold_timeout normally clears the topic at
+                  # 10 min, so reaching here means that failed too.
+                  - mqtt.publish:
+                      topic: "${name}/ota"
+                      payload: "OFF"
+                      retain: true
+                  - delay: 500ms
+                  - script.execute: enter_sleep
 
   # ---- Guarded sleep: all explicit sleep points go through here ----
   # >=5 consecutive GPIO wakes = wet/stuck button. Sleep timer-only (button
@@ -529,11 +740,13 @@ script:
 
   # Retained OTA ON is a convenience, not permission to drain a cell forever.
   # A valid babysitter refreshes/releases the hold within minutes; if it dies,
-  # this watchdog clears the local hold after 30 minutes and returns to sleep.
+  # this watchdog clears the local hold after 10 minutes and returns to sleep.
+  # An upload plus exact-build verification takes tens of seconds once a node is
+  # awake, so 10 min is ample for both an automated and a manual update.
   - id: ota_hold_timeout
     mode: restart
     then:
-      - delay: 30min
+      - delay: 10min
       - if:
           condition:
             lambda: 'return id(ota_hold);'
@@ -541,7 +754,7 @@ script:
             - lambda: 'id(ota_hold) = false;'
             - logger.log:
                 level: WARN
-                format: "OTA hold timed out after 30 minutes - releasing local hold"
+                format: "OTA hold timed out after 10 minutes - releasing local hold"
             - mqtt.publish:
                 topic: "${name}/ota"
                 payload: "OFF"
@@ -676,9 +889,14 @@ script:
       # restored counter before sleep. Early validation prevents OTA rollback.
       - lambda: |-
           id(failed_gpio_wake_count) = 0;
+          id(failed_report_streak) = 0;   // clears the offline backoff ladder
+          id(report_ok) = true;           // disarms connect_watchdog
           id(safe_mode_ctrl).mark_successful();
       - delay: 1s                        # let MQTT flush the publishes
-      - script.execute: usb_hold_update  # single-lambda script: completes inline
+      # The ONLY place a USB hold may be acquired - see usb_hold_update.
+      - script.execute:                  # single-lambda script: completes inline
+          id: usb_hold_update
+          allow_acquire: true
       - if:
           condition:
             lambda: 'return id(ota_hold) || id(usb_hold) || id(calibration_active) || id(settings_active);'
@@ -688,10 +906,6 @@ script:
           else:
             - script.execute: enter_sleep
 
-# USB hold: acquire path for broken-WiFi wakes (report_and_sleep never runs;
-# device stays up to the 30s run_duration cap -> ~5 checks) and release path
-# after unplug (frozen SOF counter -> sleep instead of draining the battery).
-# Normal 2.8s battery wakes end before the first tick fires.
 binary_sensor:
   - platform: template
     id: soil_sensor_fault
@@ -700,17 +914,37 @@ binary_sensor:
     entity_category: diagnostic
     # Each wake creates a fresh template sensor. Without this, ESPHome accepts
     # the first healthy OFF state internally but suppresses its MQTT callback,
-    # leaving both the discovered entity and HA's fixed-ID monitor "unknown".
+    # leaving both the discovered entity and any fixed-ID MQTT monitor
+    # subscribed to it stuck at "unknown".
+    trigger_on_initial_state: true
+
+  # The USB hold was the only sleep-blocking hold with no HA visibility, which
+  # is why a wedged one could only be found with a power analyser. Retained, so
+  # a node that dies holding leaves "ON" behind for an HA automation to catch.
+  - platform: template
+    id: usb_hold_active
+    name: "USB hold"
+    device_class: plug
+    entity_category: diagnostic
     trigger_on_initial_state: true
 
 interval:
+  # Release half of the USB hold only (see usb_hold_update). This is a no-op
+  # when no hold is held, so battery wakes no longer pay a blocking poll.
   - interval: 5s
     then:
-      - script.execute: usb_hold_update
-
+      - script.execute:
+          id: usb_hold_update
+          allow_acquire: false
 deep_sleep:
   id: deep_sleep_control
-  run_duration: 30s           # SAFETY CAP only - normal path sleeps early via report_and_sleep
+  # NOT a safety cap. run_duration is a ONE-SHOT timeout: if any hold has
+  # called prevent_deep_sleep() when it fires, begin_sleep() only latches
+  # next_enter_deep_sleep_ and loop() spins until allow_deep_sleep() is called
+  # (deep_sleep_component.cpp). It closes a wake only while nothing holds.
+  # The real backstops are connect_watchdog, each hold's own timeout, and
+  # awake_watchdog above.
+  run_duration: 30s
   sleep_duration: 8h          # default; overridden per reading
 
 sensor:
@@ -1089,5 +1323,10 @@ wifi:
     dns1: !secret wifi_dns
   ap:
     ssid: "setup-${name}"
+    # A SoftAP + captive portal on a battery node is pure drain and nobody is
+    # there to use it. Keep the fallback past report_timeout_ms (20 s) and
+    # run_duration (30 s) so a failed wake always deep-sleeps first. Default
+    # is 90 s, which already clears both; this pins it against that changing.
+    ap_timeout: 5min
 
 captive_portal:
