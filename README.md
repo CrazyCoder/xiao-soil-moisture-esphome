@@ -559,6 +559,7 @@ MQTT discovery creates these entities for each device:
 | Battery voltage | Raw cell voltage. Use this to diagnose a cell. |
 | Soil sensor fault | Problem class. On for a bad ADC or bad calibration. |
 | Button wake count | Consecutive button wakes. Above 2 means a wet button. |
+| USB hold | Shows if a USB host keeps the device awake |
 | WiFi signal | Signal strength in dBm |
 | MCU temperature | Die temperature, sampled before WiFi starts |
 | Calibration dry / wet / span | The stored calibration |
@@ -588,14 +589,26 @@ target. There are three methods.
 ### The USB hold
 
 `packages/usb_host_detect.h` reads the USB-Serial-JTAG frame counter twice,
-20 ms apart. An enumerated USB host sends SOF frames at 1 kHz, so the counter
-moves. A charger or a power bank never sends SOF frames. The check therefore
-answers "is a real host attached?", not "is there 5 V?".
+20 ms apart. An enumerated USB host sends SOF frames at 1 kHz. The count between
+the two reads must therefore agree with a 20 ms interval. The check accepts only
+a count in that range, and it does the test across two sequential windows. A
+charger or a power bank never sends SOF frames. The check therefore answers "is
+a real host attached?", not "is there 5 V?".
 
 When a host appears, the firmware stops the deep sleep and **turns on the green
 LED**. The LED means "I am awake, flash me now". When you disconnect the cable,
 the device returns to its schedule. Without this hold you must complete a flash
 inside a 2.8 second window.
+
+The hold also has a 5 minute timeout. At each timeout the firmware does the test
+again. A host that stays connected sets the hold again. If no host is present,
+the device returns to its schedule.
+
+> **The count check and the timeout are necessary.** A USB hold cancels the
+> `run_duration` limit permanently, and no other limit applied before firmware
+> 1.5.2. One bad read of the counter could therefore hold a node awake at full
+> radio power until the cell was empty. A node that never sleeps also never
+> reports, so the fault gave no alert.
 
 ### Method A: USB
 
@@ -647,8 +660,8 @@ mosquitto_pub -h BROKER -u USER -P PASS -r -t 'plant-1/ota' -m OFF
 > "OTA successful" from the uploader only means that the bytes arrived.
 
 > **A retained `ON` that you forget empties the battery**, because it holds the
-> device awake. Always do step 5. The firmware clears a hold after 30 minutes as
-> a backstop.
+> device awake. Always do step 5. The firmware clears a hold after 10 minutes as
+> a backstop. An upload takes seconds, so this limit is sufficient.
 
 ### Method C: the babysitter
 
@@ -689,6 +702,10 @@ from every device file in the configuration directory. Select devices by name
 Two requirements: the machine must reach both the MQTT broker and the addresses
 of the devices, so run it on the same network. The wake timeout is 6 hours,
 against a longest schedule of 4 hours.
+
+A device that cannot reach the broker increases its own sleep time, to a maximum
+of 6 hours. Such a device can miss that timeout during a network outage. Press
+its button to wake it, or start the script again.
 
 The script publishes each result to `soil-ota-babysitter/notification`. Home
 Assistant can forward that topic to any notification service.
@@ -736,22 +753,36 @@ the detection method and the repair.
   then ignores or cross-wires every device after the first one.
 - **Verify a build from MQTT, not from the uploader.** Read
   `<node>/sensor/firmware_build/state`.
-- **A network failure is safe.** The configuration has three settings that look
-  wrong together:
+- **A network failure is safe.** These settings look wrong together, but each
+  one protects the cell. The first three are substitutions, so you can change
+  them in your device file.
 
   | Setting | Value | Purpose |
   |---|---|---|
-  | `deep_sleep.run_duration` | **30 s** | The real safety limit on awake time |
+  | `report_timeout_ms` | **20000** (20 s) | Ends a wake that does not reach the broker |
+  | `max_awake_ms` | **1200000** (20 min) | Absolute limit on awake time. No hold can cancel it. |
+  | `max_offline_sleep_ms` | `21600000` (6 h) | Maximum sleep after sequential failed wakes |
+  | `deep_sleep.run_duration` | `30 s` | A one-shot timeout, not a limit. Refer to the caution. |
   | `wifi.reboot_timeout` | `0s` | No restart when WiFi fails |
   | `mqtt.reboot_timeout` | `0s` | No restart when the broker fails |
+  | `wifi.ap.ap_timeout` | `5min` | Keeps the fallback hotspot out of a failed wake |
 
   On a battery device a restart is the dangerous answer and sleep is the safe
   one. A restart brings the radio back up to try again, at about 113 mA. The
-  30 second limit instead forces a sleep, and the device retries hours later.
+  20 second timeout instead forces a sleep, and the device retries later.
 
-  With the 30 second limit, a failed wake costs about 0.94 mAh. At 12 wakes each
-  day the cell survives for months with WiFi switched off. A restart loop empties
-  the same cell in about 22 hours.
+  > **Caution. `run_duration` is not a safety limit.** ESPHome starts it one
+  > time, at boot. Any hold cancels it permanently, because a hold calls
+  > `prevent_deep_sleep()`. A USB session, an OTA hold or a calibration therefore
+  > removes it for the remainder of that wake. `max_awake_ms` is the only limit
+  > that a hold cannot cancel.
+
+  A failed wake costs about 0.63 mAh, calculated from the measured wake current.
+  The device also increases its sleep time after sequential failed wakes. The
+  first failure keeps the usual interval. Each subsequent failure doubles it, to
+  a maximum of eight times the interval or 6 hours. A cell therefore survives for
+  months with WiFi switched off. A restart loop empties the same cell in about 22
+  hours.
 
   A failure is therefore silent by design. The `Soil - sensor silent` sample
   alert makes it visible.
@@ -771,6 +802,9 @@ The version appears in the `sw_version` of the Home Assistant device, and on the
 | 1.2.3 | Sleep intervals and antenna choice became substitutions |
 | 1.3.0 | Generic runtime controls and an optional rewake guard |
 | 1.4.0 | Home Assistant config switch for the persistent rewake guard |
+| 1.5.2 | Limits on the USB hold and on the awake time, and a `USB hold` entity |
+
+Versions 1.5.0 and 1.5.1 were not released.
 
 Versions follow SemVer. A patch fixes a fault with no change to behaviour or
 entities. A minor version adds behaviour or entities.
