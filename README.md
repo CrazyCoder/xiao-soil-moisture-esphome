@@ -477,6 +477,12 @@ known good pair, so a bad second phase cannot overwrite good values.
 ## Runtime controls
 
 Firmware 1.3.0 adds one generic command topic for persistent device controls.
+Firmware 1.4.0 also exposes **Rewake guard** as a switch in the device's
+Home Assistant controls. Turn it off for repeated manual checks, or turn it
+back on for the safe default. The switch command is retained, so a sleeping
+device applies it on its next wake.
+
+The generic MQTT command remains available for scripts and other controllers.
 Use a retained message, because the device can be asleep:
 
 ```sh
@@ -557,7 +563,7 @@ MQTT discovery creates these entities for each device:
 | MCU temperature | Die temperature, sampled before WiFi starts |
 | Calibration dry / wet / span | The stored calibration |
 | Calibration command result | Result of the last calibration attempt |
-| Rewake guard | Effective persistent `ON` or `OFF` value |
+| Rewake guard | Config switch for the effective persistent `ON` or `OFF` value |
 | Settings command result | Result of the last runtime control command |
 | Next sleep | The interval chosen at this wake |
 | Wake reason / Reset reason | Timer, button, or cold boot |
@@ -764,6 +770,7 @@ The version appears in the `sw_version` of the Home Assistant device, and on the
 | 1.2.2 | Publishes the healthy initial fault state instead of `unknown` |
 | 1.2.3 | Sleep intervals and antenna choice became substitutions |
 | 1.3.0 | Generic runtime controls and an optional rewake guard |
+| 1.4.0 | Home Assistant config switch for the persistent rewake guard |
 
 Versions follow SemVer. A patch fixes a fault with no change to behaviour or
 entities. A minor version adds behaviour or entities.

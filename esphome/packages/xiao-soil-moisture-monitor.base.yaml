@@ -37,7 +37,7 @@ esphome:
     name: "xiao.soil-moisture-monitor"
     # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
     # Bump for every source change that can be deployed independently.
-    version: "1.3.0"
+    version: "1.4.0"
   on_boot:
     # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
     # before radio startup so battery voltage and die temperature are captured
@@ -192,6 +192,10 @@ globals:
     type: bool
     restore_value: yes      # runtime setting - survives deep sleep and power loss
     initial_value: '${rewake_guard_default}'
+  - id: rewake_guard_discovery_migrated
+    type: bool
+    restore_value: yes
+    initial_value: 'false'
   - id: settings_active     # retained settings command is being applied/persisted
     type: bool
     restore_value: no
@@ -372,8 +376,101 @@ script:
           id(reset_reason_sensor).publish_state(
               soil_reset_reason(esp_reset_reason()));
           id(next_sleep_sensor).publish_state(id(next_sleep_ms) / 1000.0f);
-          id(rewake_guard_setting_sensor).publish_state(
-              id(rewake_guard_enabled) ? "ON" : "OFF");
+      - switch.template.publish:
+          id: rewake_guard_switch
+          state: !lambda 'return id(rewake_guard_enabled);'
+
+  - id: clear_rewake_guard_commands
+    then:
+      - mqtt.publish:
+          topic: "${name}/settings/rewake_guard/command"
+          payload: ""
+          retain: true
+      - mqtt.publish:
+          topic: "${name}/settings/command"
+          payload: ""
+          retain: true
+
+  - id: request_rewake_guard_setting
+
+    mode: queued
+    max_runs: 2
+    parameters:
+      enabled: bool
+      source: std::string
+    then:
+      - if:
+          condition:
+            lambda: 'return id(settings_active) || id(calibration_active);'
+          then:
+            - lambda: |-
+                char result[160];
+                std::snprintf(
+                    result, sizeof(result),
+                    "Rejected %s: another settings/calibration update is active",
+                    source.c_str());
+                id(settings_result_sensor).publish_state(result);
+                ESP_LOGW("settings", "%s", result);
+            - switch.template.publish:
+                id: rewake_guard_switch
+                state: !lambda 'return id(rewake_guard_enabled);'
+            - script.execute: clear_rewake_guard_commands
+          else:
+            - if:
+                condition:
+                  lambda: 'return id(rewake_guard_enabled) == enabled;'
+                then:
+                  - lambda: |-
+                      char result[128];
+                      std::snprintf(
+                          result, sizeof(result),
+                          "%s unchanged: REWAKE_GUARD=%s",
+                          source.c_str(), enabled ? "ON" : "OFF");
+                      id(settings_result_sensor).publish_state(result);
+                      ESP_LOGI("settings", "%s", result);
+                  - switch.template.publish:
+                      id: rewake_guard_switch
+                      state: !lambda 'return enabled;'
+                  - script.execute: clear_rewake_guard_commands
+                else:
+                  - lambda: |-
+                      id(settings_active) = true;
+                      id(deep_sleep_control).prevent_deep_sleep();
+                      id(rewake_guard_enabled) = enabled;
+                      char result[128];
+                      std::snprintf(
+                          result, sizeof(result),
+                          "%s saved: REWAKE_GUARD=%s",
+                          source.c_str(), enabled ? "ON" : "OFF");
+                      id(settings_result_sensor).publish_state(result);
+                      ESP_LOGI("settings", "%s", result);
+                  # Restored globals flush changed values every second.
+                  - delay: 1200ms
+                  - script.execute: publish_device_diagnostics
+                  - script.execute: clear_rewake_guard_commands
+                  - lambda: 'id(settings_active) = false;'
+                  - if:
+                      condition:
+                        lambda: 'return !id(ota_hold) && !id(usb_hold) && !id(calibration_active);'
+                      then:
+                        - deep_sleep.allow: deep_sleep_control
+                        # report_and_sleep can already be complete. Allow its
+                        # publishes to flush, then close this wake explicitly.
+                        - delay: 1500ms
+                        - script.execute: enter_sleep
+  - id: migrate_rewake_guard_discovery
+    then:
+      - if:
+          condition:
+            lambda: 'return !id(rewake_guard_discovery_migrated);'
+          then:
+            # v1.3.0 exposed a read-only text sensor with this object id.
+            # Remove its retained discovery record when the config switch lands.
+            - mqtt.publish:
+                topic: "homeassistant/sensor/${name}/rewake_guard/config"
+                payload: ""
+                retain: true
+            - lambda: 'id(rewake_guard_discovery_migrated) = true;'
 
   # ------- USB flash hold: stay awake while a USB host is attached -------
   # SOF-counter check (usb_host_present) sees only enumerated hosts, never
@@ -572,6 +669,7 @@ script:
       - component.update: wifi_sig
       - lambda: 'id(wake_count_sensor).publish_state(id(gpio_wake_count));'
       - script.execute: publish_calibration_diagnostics
+      - script.execute: migrate_rewake_guard_discovery
       - script.execute: publish_device_diagnostics
       # Boot reached WiFi+MQTT and reported: reset the unconditional no-report
       # backstop and mark the app valid. The one-second flush delay persists the
@@ -730,6 +828,28 @@ sensor:
     accuracy_decimals: 0
     update_interval: never
 
+switch:
+  - platform: template
+    id: rewake_guard_switch
+    name: "Rewake guard"
+    entity_category: config
+    lambda: 'return id(rewake_guard_enabled);'
+    restore_mode: DISABLED   # restored global owns state; never fire OFF during setup
+    state_topic: "${name}/settings/rewake_guard/state"
+    command_topic: "${name}/settings/rewake_guard/command"
+    command_retain: true
+    retain: true
+    turn_on_action:
+      - script.execute:
+          id: request_rewake_guard_setting
+          enabled: true
+          source: "Home Assistant"
+    turn_off_action:
+      - script.execute:
+          id: request_rewake_guard_setting
+          enabled: false
+          source: "Home Assistant"
+
 text_sensor:
   - platform: template
     id: soil_status
@@ -742,11 +862,6 @@ text_sensor:
     entity_category: diagnostic
     update_interval: never
 
-  - platform: template
-    id: rewake_guard_setting_sensor
-    name: "Rewake guard"
-    entity_category: diagnostic
-    update_interval: never
 
   - platform: template
     id: settings_result_sensor
@@ -910,8 +1025,7 @@ mqtt:
     #   SET REWAKE_GUARD ON
     #   SET REWAKE_GUARD OFF
     #   RESET REWAKE_GUARD
-    # The command is persisted in NVS, reported, then removed from the broker.
-    # Add future settings to this handler instead of adding ad-hoc MQTT topics.
+    # The Home Assistant config switch uses the same persistence script.
     - topic: "${name}/settings/command"
       then:
         - if:
@@ -920,78 +1034,45 @@ mqtt:
             then:
               - if:
                   condition:
-                    lambda: 'return id(settings_active) || id(calibration_active);'
+                    lambda: |-
+                      const auto command = soil_parse_setting_command(x);
+                      const bool is_rewake_guard =
+                          std::strcmp(command.key, "REWAKE_GUARD") == 0;
+                      const bool valid_set =
+                          command.action == SoilSettingAction::SET &&
+                          (std::strcmp(command.value, "ON") == 0 ||
+                           std::strcmp(command.value, "OFF") == 0);
+                      return is_rewake_guard &&
+                             (valid_set ||
+                              command.action == SoilSettingAction::RESET);
                   then:
-                    - lambda: |-
-                        id(settings_result_sensor).publish_state(
-                            "Rejected: another settings/calibration update is active");
-                    - mqtt.publish:
-                        topic: "${name}/settings/command"
-                        payload: ""
-                        retain: true
+                    - script.execute:
+                        id: request_rewake_guard_setting
+                        enabled: !lambda |-
+                          const auto command = soil_parse_setting_command(x);
+                          if (command.action == SoilSettingAction::RESET) {
+                            return ${rewake_guard_default};
+                          }
+                          return std::strcmp(command.value, "ON") == 0;
+                        source: !lambda |-
+                          const auto command = soil_parse_setting_command(x);
+                          return command.action == SoilSettingAction::RESET
+                                     ? std::string("RESET")
+                                     : std::string("SET");
                   else:
                     - lambda: |-
-                        id(settings_active) = true;
-                        id(deep_sleep_control).prevent_deep_sleep();
-
-                        const auto command = soil_parse_setting_command(x);
-                        bool accepted = false;
-                        bool enabled = id(rewake_guard_enabled);
-                        const bool is_rewake_guard =
-                            std::strcmp(command.key, "REWAKE_GUARD") == 0;
-
-                        if (command.action == SoilSettingAction::SET &&
-                            is_rewake_guard) {
-                          if (std::strcmp(command.value, "ON") == 0) {
-                            enabled = true;
-                            accepted = true;
-                          } else if (std::strcmp(command.value, "OFF") == 0) {
-                            enabled = false;
-                            accepted = true;
-                          }
-                        } else if (command.action == SoilSettingAction::RESET &&
-                                   is_rewake_guard) {
-                          enabled = ${rewake_guard_default};
-                          accepted = true;
-                        }
-
                         char result[160];
-                        if (accepted) {
-                          id(rewake_guard_enabled) = enabled;
-                          std::snprintf(
-                              result, sizeof(result),
-                              "%s saved: REWAKE_GUARD=%s",
-                              command.action == SoilSettingAction::RESET
-                                  ? "RESET"
-                                  : "SET",
-                              enabled ? "ON" : "OFF");
-                          ESP_LOGI("settings", "%s", result);
-                        } else {
-                          std::snprintf(
-                              result, sizeof(result),
-                              "Rejected '%s': use SET REWAKE_GUARD <ON|OFF> "
-                              "or RESET REWAKE_GUARD",
-                              x.c_str());
-                          ESP_LOGW("settings", "%s", result);
-                        }
+                        std::snprintf(
+                            result, sizeof(result),
+                            "Rejected '%s': use SET REWAKE_GUARD <ON|OFF> "
+                            "or RESET REWAKE_GUARD",
+                            x.c_str());
                         id(settings_result_sensor).publish_state(result);
-                    # Restored globals flush changed values every second.
-                    - delay: 1200ms
-                    - script.execute: publish_device_diagnostics
+                        ESP_LOGW("settings", "%s", result);
                     - mqtt.publish:
                         topic: "${name}/settings/command"
                         payload: ""
                         retain: true
-                    - lambda: 'id(settings_active) = false;'
-                    - if:
-                        condition:
-                          lambda: 'return !id(ota_hold) && !id(usb_hold) && !id(calibration_active);'
-                        then:
-                          - deep_sleep.allow: deep_sleep_control
-                          # report_and_sleep can already be complete. Allow its
-                          # publishes to flush, then close this wake explicitly.
-                          - delay: 1500ms
-                          - script.execute: enter_sleep
 
 wifi:
   ssid: !secret wifi_ssid
