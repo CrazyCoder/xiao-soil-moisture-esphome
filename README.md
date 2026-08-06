@@ -241,6 +241,17 @@ firmware](#how-to-update-the-firmware).
 Use `sample-timer-only.yaml` instead if the CN4 button is absent from your
 board.
 
+The samples enable the rewake guard. Set this optional substitution to start
+with the guard off:
+
+```yaml
+substitutions:
+  rewake_guard_default: "false"
+```
+
+This value seeds a device with no saved control value. It is also the target of
+the MQTT `RESET` command below.
+
 ### Windows notes
 
 **Build from PowerShell or the Command Prompt.** If you do that, the rest of this
@@ -297,10 +308,10 @@ The levers, in order of effect.
    a USB session and an OTA hold.
 7. **A battery percentage from an alkaline curve**, sampled before WiFi starts.
    Refer to [The battery percentage](#the-battery-percentage).
-8. **A rewake guard.** Water on the button is a power problem, because the
-   button is also the wake pin. A wet button woke one device continuously and
-   emptied a full cell in about two hours. After 5 button wakes in a row the
-   firmware takes a timer-only sleep.
+8. **A rewake guard.** Water on the button can wake the device continuously.
+   One wet button emptied a full cell in about two hours. By default, five
+   reported button wakes cause one timer-only sleep. You can disable this guard.
+   A separate no-report backstop always protects a device that cannot reach MQTT.
 
 ![One wake, measured with a PPK2](docs/img/ppk2-wake.png)
 
@@ -463,6 +474,42 @@ the unit at its next wake.
 Calibration is protected in the same way. A failed calibration keeps the last
 known good pair, so a bad second phase cannot overwrite good values.
 
+## Runtime controls
+
+Firmware 1.3.0 adds one generic command topic for persistent device controls.
+Use a retained message, because the device can be asleep:
+
+```sh
+# Disable the rewake guard:
+mosquitto_pub -h BROKER -u USER -P PASS \
+  -r -t 'plant-1/settings/command' -m 'SET REWAKE_GUARD OFF'
+
+# Enable the rewake guard:
+mosquitto_pub -h BROKER -u USER -P PASS \
+  -r -t 'plant-1/settings/command' -m 'SET REWAKE_GUARD ON'
+
+# Restore the compiled rewake_guard_default:
+mosquitto_pub -h BROKER -u USER -P PASS \
+  -r -t 'plant-1/settings/command' -m 'RESET REWAKE_GUARD'
+```
+
+The stable grammar is `SET <name> <value>` or `RESET <name>`. Future persistent
+controls will use this topic and grammar.
+
+The device validates the full command and saves an accepted value in flash.
+It then reports the effective value and clears the retained command. A bad
+command changes nothing.
+
+The saved value survives deep sleep and battery removal. It has precedence
+over `rewake_guard_default` until the next `SET` or `RESET`.
+
+`OFF` disables the timer-only sleep after five completed button wake reports.
+The `Button wake count` entity still reports all button wakes.
+
+The separate hard backstop cannot be disabled. It acts after ten GPIO wakes
+that fail to complete an MQTT report. This stops a wet-button loop when WiFi or
+MQTT is unavailable.
+
 ## Calibration
 
 Calibration sets the dry voltage and the wet voltage of your probe. Both values
@@ -510,12 +557,17 @@ MQTT discovery creates these entities for each device:
 | MCU temperature | Die temperature, sampled before WiFi starts |
 | Calibration dry / wet / span | The stored calibration |
 | Calibration command result | Result of the last calibration attempt |
+| Rewake guard | Effective persistent `ON` or `OFF` value |
+| Settings command result | Result of the last runtime control command |
 | Next sleep | The interval chosen at this wake |
 | Wake reason / Reset reason | Timer, button, or cold boot |
 | Firmware build | Exact version and configuration hash |
 
 `Calibration command result` stays `unknown` until you calibrate. It reports the
 last operation. It is not a health sensor.
+
+`Settings command result` stays `unknown` until the first runtime control
+command. Invalid commands appear there, but they do not change the saved value.
 
 Sample alerts are in
 [`homeassistant/soil-alerts.yaml`](homeassistant/soil-alerts.yaml): battery low,
@@ -711,6 +763,7 @@ The version appears in the `sw_version` of the Home Assistant device, and on the
 | 1.2.1 | Probe drive stops after 5 s when MQTT never connects |
 | 1.2.2 | Publishes the healthy initial fault state instead of `unknown` |
 | 1.2.3 | Sleep intervals and antenna choice became substitutions |
+| 1.3.0 | Generic runtime controls and an optional rewake guard |
 
 Versions follow SemVer. A patch fixes a fault with no change to behaviour or
 entities. A minor version adds behaviour or entities.

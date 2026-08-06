@@ -34,10 +34,10 @@
           {{ trigger.to_state.attributes.friendly_name }} is at
           {{ trigger.to_state.state }}%. Replace the AA cell.
 
-# The button is also the deep-sleep wake pin. Water on the button wakes the
-# device again immediately after each sleep, which empties the cell in hours.
-# The firmware limits the damage: after 5 button wakes in a row it takes a
-# timer-only sleep. A count above 2 still means the button is wet or stuck.
+# The button is also the deep-sleep wake pin. Water on it can empty the cell.
+# By default, five reported button wakes cause one timer-only sleep.
+# The runtime guard is optional, but the wake count always remains active.
+# A count above 2 still means that the button is wet or stuck.
 # Refer to docs/hardware-notes.md.
 - alias: "Soil - button wet or stuck"
   id: soil_button_stuck

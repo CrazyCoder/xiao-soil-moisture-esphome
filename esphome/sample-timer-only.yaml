@@ -13,6 +13,7 @@ substitutions:
   # sleep_normal_ms:     "7200000"   #  2 h - detect Almost Dry within 2 h
   # sleep_almost_dry_ms: "3600000"   #  1 h - detect Dry within 1 h
   # sleep_dry_ms:       "14400000"   #  4 h - confirm watering within 4 h
+  # rewake_guard_default: "true"  # "false" starts with button protection off
   # external_antenna:       "true"   # "false" if the u.FL antenna is removed
   # dry_init: "2.75"                 # per-probe calibration seed
   # wet_init: "1.2"

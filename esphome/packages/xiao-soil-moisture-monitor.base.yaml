@@ -12,6 +12,9 @@ substitutions:
   dry_init: "2.75"          # default calibration seeds; override per device
   wet_init: "1.2"
   stuck_backoff_ms: "14400000"   # 4h timer-only backoff once the rewake guard trips
+  # Compiled default for the persistent MQTT setting. Set "false" in a device
+  # stub to start with the guard disabled; RESET restores this value.
+  rewake_guard_default: "true"
   # Sleep interval per classified state. Override in a device stub to retune.
   # Cost is computable: wakes/day = 86400 / (interval_ms / 1000).
   sleep_normal_ms:     "7200000"    #  2 h - detect Almost Dry within 2 h
@@ -29,34 +32,41 @@ esphome:
     - packages/usb_host_detect.h    # usb_host_present(): SOF-counter USB host check
     - packages/battery_curve.h      # alkaline_aa_percent(): AA discharge curve
     - packages/soil_monitor_helpers.h
+    - packages/soil_settings.h         # generic SET/RESET settings command parser
   project:
     name: "xiao.soil-moisture-monitor"
     # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
     # Bump for every source change that can be deployed independently.
-    version: "1.2.3"
+    version: "1.3.0"
   on_boot:
     # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
     # before radio startup so battery voltage and die temperature are captured
     # at the same repeatable, low-load point in every wake.
     priority: 599
     then:
-      # --- Rewake guard: count consecutive GPIO (button) wakes ---
+      # --- Rewake safety: count GPIO wakes and failed GPIO wake reports ---
       # A wet/stuck button re-wakes the device the instant it sleeps (level-
-      # triggered wake, wakeup_pin_mode IGNORE re-arms it) -> reboot-report loop
-      # that drains the battery in hours. Timer/cold boots reset the counter.
+      # triggered wake, wakeup_pin_mode IGNORE re-arms it). The configurable
+      # guard handles completed report cycles. The unconditional failed-report
+      # backstop still stops a no-WiFi loop when the configurable guard is off.
+      # Timer/cold boots reset both counters.
       - lambda: |-
           auto cause = esp_sleep_get_wakeup_cause();
           if (cause == ESP_SLEEP_WAKEUP_GPIO || cause == ESP_SLEEP_WAKEUP_EXT1) {
             id(gpio_wake_count) += 1;
+            id(failed_gpio_wake_count) += 1;
           } else {
             id(gpio_wake_count) = 0;
+            id(failed_gpio_wake_count) = 0;
           }
-          ESP_LOGI("rewake_guard", "wake cause=%d, consecutive GPIO wakes=%d", (int) cause, id(gpio_wake_count));
-          if (id(gpio_wake_count) >= 10) {
-            // Only reachable when report cycles keep failing (e.g. wet button
-            // AND no WiFi): the <5 guard in enter_sleep never ran. Bail now.
-            ESP_LOGW("rewake_guard", "%d GPIO re-wakes without a completed cycle - %llds timer-only backoff", id(gpio_wake_count), (long long) (${stuck_backoff_ms} / 1000));
+          ESP_LOGI(
+              "rewake_guard",
+              "wake cause=%d, consecutive GPIO wakes=%d, unreported=%d",
+              (int) cause, id(gpio_wake_count), id(failed_gpio_wake_count));
+          if (soil_failed_rewake_backoff(id(failed_gpio_wake_count))) {
+            ESP_LOGW("rewake_guard", "%d GPIO re-wakes without a completed cycle - %llds timer-only backoff", id(failed_gpio_wake_count), (long long) (${stuck_backoff_ms} / 1000));
             esp_sleep_enable_timer_wakeup(${stuck_backoff_ms}ULL * 1000ULL);
+            global_preferences->sync();
             esp_deep_sleep_start();
           }
       # --- XIAO ESP32-C6 antenna select (external u.FL) ---
@@ -174,6 +184,18 @@ globals:
     type: int
     restore_value: yes      # NVS - survives deep sleep
     initial_value: '0'
+  - id: failed_gpio_wake_count  # unconditional no-report runaway backstop
+    type: int
+    restore_value: yes
+    initial_value: '0'
+  - id: rewake_guard_enabled
+    type: bool
+    restore_value: yes      # runtime setting - survives deep sleep and power loss
+    initial_value: '${rewake_guard_default}'
+  - id: settings_active     # retained settings command is being applied/persisted
+    type: bool
+    restore_value: no
+    initial_value: 'false'
   - id: next_sleep_ms       # mirrors set_sleep_duration for the guarded timer-only path
     type: int
     restore_value: no
@@ -253,11 +275,19 @@ script:
       - delay: 1000ms
       - light.turn_off: yellow_led
       - delay: 100ms
+  # Green doubles as the USB-hold indicator (usb_hold_update), which is
+  # edge-triggered and never re-asserts. Turning green off unconditionally here
+  # left the indicator dark while the hold was still active, so only clear it
+  # when no USB host is holding us awake.
   - id: green_status_pulse
     then:
       - light.turn_on: green_led
       - delay: 1000ms
-      - light.turn_off: green_led
+      - if:
+          condition:
+            lambda: 'return !id(usb_hold);'
+          then:
+            - light.turn_off: green_led
       - delay: 100ms
 
   # ------- Read moisture, classify, set next sleep, publish -------
@@ -342,6 +372,8 @@ script:
           id(reset_reason_sensor).publish_state(
               soil_reset_reason(esp_reset_reason()));
           id(next_sleep_sensor).publish_state(id(next_sleep_ms) / 1000.0f);
+          id(rewake_guard_setting_sensor).publish_state(
+              id(rewake_guard_enabled) ? "ON" : "OFF");
 
   # ------- USB flash hold: stay awake while a USB host is attached -------
   # SOF-counter check (usb_host_present) sees only enumerated hosts, never
@@ -361,7 +393,7 @@ script:
             id(usb_hold) = false;
             ESP_LOGI("usb_hold", "USB host disconnected - releasing hold");
             id(green_led).turn_off().perform();
-            if (!id(ota_hold) && !id(calibration_active)) {
+            if (!id(ota_hold) && !id(calibration_active) && !id(settings_active)) {
               id(deep_sleep_control).allow_deep_sleep();
               id(enter_sleep).execute();
             }
@@ -379,20 +411,21 @@ script:
     then:
       - if:
           condition:
-            lambda: 'return id(calibration_active);'
+            lambda: 'return id(calibration_active) || id(settings_active);'
           then:
             - logger.log:
-                format: "Calibration is active - refusing explicit sleep"
+                format: "Calibration/settings update is active - refusing explicit sleep"
           else:
             - if:
                 condition:
-                  lambda: 'return id(gpio_wake_count) >= 5;'
+                  lambda: 'return soil_reported_rewake_backoff(id(rewake_guard_enabled), id(gpio_wake_count));'
                 then:
                   - logger.log:
                       level: WARN
                       format: "Rapid GPIO re-wakes (wet/stuck button?) - timer-only backoff, button wake disabled"
                   - lambda: |-
                       esp_sleep_enable_timer_wakeup(${stuck_backoff_ms}ULL * 1000ULL);
+                      global_preferences->sync();
                       esp_deep_sleep_start();
                 else:
                   - deep_sleep.enter: deep_sleep_control
@@ -419,7 +452,7 @@ script:
             - delay: 500ms
             - if:
                 condition:
-                  lambda: 'return !id(usb_hold) && !id(calibration_active);'
+                  lambda: 'return !id(usb_hold) && !id(calibration_active) && !id(settings_active);'
                 then:
                   - deep_sleep.allow: deep_sleep_control
                   - script.execute: enter_sleep
@@ -507,7 +540,7 @@ script:
       - lambda: 'id(calibration_active) = false;'
       - if:
           condition:
-            lambda: 'return !id(ota_hold) && !id(usb_hold);'
+            lambda: 'return !id(ota_hold) && !id(usb_hold) && !id(settings_active);'
           then:
             - deep_sleep.allow: deep_sleep_control
             - script.execute: enter_sleep
@@ -518,7 +551,7 @@ script:
   - id: report_and_sleep
     mode: single
     then:
-      - delay: 500ms                     # let retained ${name}/ota topic arrive first
+      - delay: 500ms                     # let retained OTA/settings topics arrive first
       - if:
           condition:
             lambda: 'return !id(calibration_active);'
@@ -540,17 +573,19 @@ script:
       - lambda: 'id(wake_count_sensor).publish_state(id(gpio_wake_count));'
       - script.execute: publish_calibration_diagnostics
       - script.execute: publish_device_diagnostics
-      # Boot reached WiFi+MQTT and reported: mark app valid NOW. The bootloader's OTA
-      # rollback otherwise reverts any new image on next wake (validation normally
-      # happens at 60s uptime, but we sleep at ~3s).
-      - lambda: 'id(safe_mode_ctrl).mark_successful();'
+      # Boot reached WiFi+MQTT and reported: reset the unconditional no-report
+      # backstop and mark the app valid. The one-second flush delay persists the
+      # restored counter before sleep. Early validation prevents OTA rollback.
+      - lambda: |-
+          id(failed_gpio_wake_count) = 0;
+          id(safe_mode_ctrl).mark_successful();
       - delay: 1s                        # let MQTT flush the publishes
       - script.execute: usb_hold_update  # single-lambda script: completes inline
       - if:
           condition:
-            lambda: 'return id(ota_hold) || id(usb_hold) || id(calibration_active);'
+            lambda: 'return id(ota_hold) || id(usb_hold) || id(calibration_active) || id(settings_active);'
           then:
-            - logger.log: "OTA/USB/calibration hold active - staying awake"
+            - logger.log: "OTA/USB/calibration/settings hold active - staying awake"
             - deep_sleep.prevent: deep_sleep_control
           else:
             - script.execute: enter_sleep
@@ -708,6 +743,18 @@ text_sensor:
     update_interval: never
 
   - platform: template
+    id: rewake_guard_setting_sensor
+    name: "Rewake guard"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
+    id: settings_result_sensor
+    name: "Settings command result"
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
     id: firmware_build_sensor
     name: "Firmware build"
     entity_category: diagnostic
@@ -765,7 +812,7 @@ mqtt:
                     - logger.log: "OTA hold released - sleeping"
                     - if:
                         condition:
-                          lambda: 'return !id(usb_hold) && !id(calibration_active);'
+                          lambda: 'return !id(usb_hold) && !id(calibration_active) && !id(settings_active);'
                         then:
                           - deep_sleep.allow: deep_sleep_control
                           - script.execute: enter_sleep
@@ -783,11 +830,11 @@ mqtt:
             then:
               - if:
                   condition:
-                    lambda: 'return id(calibration_active);'
+                    lambda: 'return id(calibration_active) || id(settings_active);'
                   then:
                     - lambda: |-
                         id(calibration_result_sensor).publish_state(
-                            "Rejected: another calibration is active");
+                            "Rejected: another calibration/settings update is active");
                     - mqtt.publish:
                         topic: "${name}/calibration/command"
                         payload: ""
@@ -850,12 +897,99 @@ mqtt:
                     - lambda: 'id(calibration_active) = false;'
                     - if:
                         condition:
-                          lambda: 'return !id(ota_hold) && !id(usb_hold);'
+                          lambda: 'return !id(ota_hold) && !id(usb_hold) && !id(settings_active);'
                         then:
                           - deep_sleep.allow: deep_sleep_control
                           # If report_and_sleep already saw the calibration hold,
                           # it will not retry sleep itself. Give its publishes
                           # time to flush, then close this wake explicitly.
+                          - delay: 1500ms
+                          - script.execute: enter_sleep
+
+    # Generic retained one-shot settings command:
+    #   SET REWAKE_GUARD ON
+    #   SET REWAKE_GUARD OFF
+    #   RESET REWAKE_GUARD
+    # The command is persisted in NVS, reported, then removed from the broker.
+    # Add future settings to this handler instead of adding ad-hoc MQTT topics.
+    - topic: "${name}/settings/command"
+      then:
+        - if:
+            condition:
+              lambda: 'return !x.empty();'   # ignore our retained-delete echo
+            then:
+              - if:
+                  condition:
+                    lambda: 'return id(settings_active) || id(calibration_active);'
+                  then:
+                    - lambda: |-
+                        id(settings_result_sensor).publish_state(
+                            "Rejected: another settings/calibration update is active");
+                    - mqtt.publish:
+                        topic: "${name}/settings/command"
+                        payload: ""
+                        retain: true
+                  else:
+                    - lambda: |-
+                        id(settings_active) = true;
+                        id(deep_sleep_control).prevent_deep_sleep();
+
+                        const auto command = soil_parse_setting_command(x);
+                        bool accepted = false;
+                        bool enabled = id(rewake_guard_enabled);
+                        const bool is_rewake_guard =
+                            std::strcmp(command.key, "REWAKE_GUARD") == 0;
+
+                        if (command.action == SoilSettingAction::SET &&
+                            is_rewake_guard) {
+                          if (std::strcmp(command.value, "ON") == 0) {
+                            enabled = true;
+                            accepted = true;
+                          } else if (std::strcmp(command.value, "OFF") == 0) {
+                            enabled = false;
+                            accepted = true;
+                          }
+                        } else if (command.action == SoilSettingAction::RESET &&
+                                   is_rewake_guard) {
+                          enabled = ${rewake_guard_default};
+                          accepted = true;
+                        }
+
+                        char result[160];
+                        if (accepted) {
+                          id(rewake_guard_enabled) = enabled;
+                          std::snprintf(
+                              result, sizeof(result),
+                              "%s saved: REWAKE_GUARD=%s",
+                              command.action == SoilSettingAction::RESET
+                                  ? "RESET"
+                                  : "SET",
+                              enabled ? "ON" : "OFF");
+                          ESP_LOGI("settings", "%s", result);
+                        } else {
+                          std::snprintf(
+                              result, sizeof(result),
+                              "Rejected '%s': use SET REWAKE_GUARD <ON|OFF> "
+                              "or RESET REWAKE_GUARD",
+                              x.c_str());
+                          ESP_LOGW("settings", "%s", result);
+                        }
+                        id(settings_result_sensor).publish_state(result);
+                    # Restored globals flush changed values every second.
+                    - delay: 1200ms
+                    - script.execute: publish_device_diagnostics
+                    - mqtt.publish:
+                        topic: "${name}/settings/command"
+                        payload: ""
+                        retain: true
+                    - lambda: 'id(settings_active) = false;'
+                    - if:
+                        condition:
+                          lambda: 'return !id(ota_hold) && !id(usb_hold) && !id(calibration_active);'
+                        then:
+                          - deep_sleep.allow: deep_sleep_control
+                          # report_and_sleep can already be complete. Allow its
+                          # publishes to flush, then close this wake explicitly.
                           - delay: 1500ms
                           - script.execute: enter_sleep
 

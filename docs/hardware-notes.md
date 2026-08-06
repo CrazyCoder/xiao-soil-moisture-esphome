@@ -72,6 +72,21 @@ cell.
 Mode 1 is the only mode that `button wake count` reports. Modes 2, 3 and 4 are
 silent, and only the battery life shows them.
 
+### The optional rewake guard
+
+The normal guard takes one timer-only sleep after five reported button wakes.
+Firmware 1.3.0 lets you disable this guard for repeated manual checks.
+
+Disable it only when you accept the battery risk. A wet button can then make
+five or more complete report cycles.
+
+A separate hard backstop is always active. It takes a timer-only sleep after
+ten GPIO wakes that fail to complete an MQTT report. This prevents an unlimited
+loop when WiFi or MQTT is unavailable.
+
+The hard backstop does not affect repeated checks that report successfully.
+Refer to **Runtime controls** in the README for the MQTT commands.
+
 **The same repair fixes modes 1, 2 and 3**, because all three end at the switch
 or at its pads. ED1 sits on the same net, so it is a second possible source of
 modes 1 and 2.
