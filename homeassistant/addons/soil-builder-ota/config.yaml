@@ -1,0 +1,40 @@
+name: Soil Builder OTA Guard
+version: "1.0.2"
+slug: soil_builder_ota
+description: MQTT wake holds for ESPHome Builder's queued updates, with automatic OFF cleanup
+arch:
+  - amd64
+  - aarch64
+startup: application
+boot: auto
+init: false
+host_network: true
+options:
+  # HA app: replace 6052 with its ingress_port from `ha addons info`.
+  builder_url: http://127.0.0.1:6052
+  builder_username: ""
+  builder_password: ""
+  mqtt_host: 127.0.0.1
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  devices:
+    - configuration: kedr.yaml
+      topic_prefix: kedr
+    - configuration: palm.yaml
+      topic_prefix: palm
+  max_wait_hours: 8
+  max_awake_minutes: 10
+schema:
+  builder_url: url
+  builder_username: str
+  builder_password: password
+  mqtt_host: str
+  mqtt_port: port
+  mqtt_username: str
+  mqtt_password: password
+  devices:
+    - configuration: str
+      topic_prefix: str
+  max_wait_hours: int(1,24)
+  max_awake_minutes: int(1,15)

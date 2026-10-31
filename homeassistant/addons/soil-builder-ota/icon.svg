@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Soil Builder OTA Guard</title>
+  <desc>A mint plant inside a protective shield with a blue firmware upload badge.</desc>
+  <rect x="4" y="4" width="120" height="120" rx="27" fill="#102f3b"/>
+  <path d="M61 19 96 32v28c0 23-16 40-35 49-19-9-35-26-35-49V32Z" fill="#56dca5"/>
+  <path d="m61 25 29 11v24c0 19-13 34-29 42-16-8-29-23-29-42V36Z" fill="#194a50"/>
+  <rect x="58.5" y="58" width="5" height="27" rx="2.5" fill="#a2f3ca"/>
+  <path d="M61 65C44 65 37 54 38 42c15-1 26 8 23 23Z" fill="#56dca5"/>
+  <path d="M61 59C59 44 69 34 84 35c1 15-8 25-23 24Z" fill="#a2f3ca"/>
+  <rect x="45.5" y="80.5" width="31" height="5" rx="2.5" fill="#a2f3ca"/>
+  <circle cx="96" cy="94" r="23" fill="#102f3b"/>
+  <circle cx="96" cy="94" r="19" fill="#38a9e3"/>
+  <path d="M94 99V89l-4 4-2.5-2.5L96 82l8.5 8.5L102 93l-4-4v10Z" fill="#fff"/>
+  <path d="M85 100h4v4h14v-4h4v8H85Z" fill="#fff"/>
+</svg>
