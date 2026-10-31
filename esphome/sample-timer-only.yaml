@@ -12,15 +12,6 @@ substitutions:
   # Build from this checkout. The Builder sample uses GitHub instead.
   soil_monitor_source: ../components
 
-  wifi_ssid: !secret wifi_ssid
-  wifi_password: !secret wifi_password
-  wifi_gateway: !secret wifi_gateway
-  wifi_subnet: !secret wifi_subnet
-  wifi_dns: !secret wifi_dns
-  mqtt_broker: !secret mqtt_broker
-  mqtt_username: !secret mqtt_username
-  mqtt_password: !secret mqtt_password
-
   # Optional. The defaults are in the base package.
   # sleep_normal_ms:     "7200000"   #  2 h - detect Almost Dry within 2 h
   # sleep_almost_dry_ms: "3600000"   #  1 h - detect Dry within 1 h

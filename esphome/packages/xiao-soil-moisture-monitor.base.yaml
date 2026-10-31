@@ -1194,9 +1194,9 @@ ota:
         - script.execute: release_ota_hold
 
 mqtt:
-  broker: "${mqtt_broker}"
-  username: "${mqtt_username}"
-  password: "${mqtt_password}"
+  broker: !secret mqtt_broker
+  username: !secret mqtt_username
+  password: !secret mqtt_password
   discovery_unique_id_generator: mac   # default 'legacy' collides across devices -> HA ignores 2nd+ device
   enable_on_boot: false       # enabled from wifi.on_connect: skips the client's 5s retry gate
   reboot_timeout: 0s          # don't reboot if broker is down; run_duration handles it
@@ -1387,8 +1387,8 @@ mqtt:
                         retain: true
 
 wifi:
-  ssid: "${wifi_ssid}"
-  password: "${wifi_password}"
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
   on_connect:
     - mqtt.enable             # connect immediately now that the network is up
   fast_connect: true          # skip full scan -> faster wake connect
@@ -1396,9 +1396,9 @@ wifi:
   reboot_timeout: 0s          # deep-sleep friendly: sleep instead of reboot on wifi loss
   manual_ip:                  # static -> skip DHCP each wake (battery)
     static_ip: "${static_ip}"
-    gateway: "${wifi_gateway}"
-    subnet: "${wifi_subnet}"
-    dns1: "${wifi_dns}"
+    gateway: !secret wifi_gateway
+    subnet: !secret wifi_subnet
+    dns1: !secret wifi_dns
   ap:
     ssid: "setup-${name}"
     # A SoftAP + captive portal on a battery node is pure drain and nobody is

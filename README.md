@@ -230,9 +230,11 @@ packages:
 ```
 
 Remove the button package line if CN4 has been removed. The base loads the C++
-helpers through `external_components` from the same repository and ref. Secrets
-are read only in the local device file and passed to the base as substitutions.
-No `packages/` directory or header files need copying to Home Assistant.
+helpers through `external_components` from the same repository and ref. The
+base keeps its original `!secret` references: ESPHome falls back to the local
+`secrets.yaml` beside the device YAML when the remote package has no secrets
+file of its own. No duplicate credential substitutions, local `packages/`
+directory or header files are needed.
 
 The sample sets `soil_monitor_repository: "CrazyCoder/xiao-soil-moisture-esphome"`
 and `soil_monitor_ref: "main"`. To pin a version, change that one
