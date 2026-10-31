@@ -6,6 +6,8 @@ substitutions:
   friendly_name: "Soil - Plant 1"
   static_ip: "192.168.1.61"
 
+  # Change owner/repository here when using a fork. Both YAML and C++ follow it.
+  soil_monitor_repository: "CrazyCoder/xiao-soil-moisture-esphome"
   # Set a tag/commit here to pin BOTH the YAML and C++ to the same release.
   soil_monitor_ref: "main"
 
@@ -29,7 +31,7 @@ substitutions:
 
 packages:
   soil_monitor:
-    url: https://github.com/SergeyZh/xiao-soil-moisture-esphome
+    url: https://github.com/${soil_monitor_repository}
     ref: ${soil_monitor_ref}
     refresh: 1d
     files:

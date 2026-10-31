@@ -216,12 +216,12 @@ your device. Add the keys from
 local `/config/esphome/secrets.yaml`; keep any existing secrets.
 
 Only the device YAML and `secrets.yaml` are needed on Home Assistant. The device
-file loads both YAML packages from this fork:
+file loads both YAML packages from the selected repository:
 
 ```yaml
 packages:
   soil_monitor:
-    url: https://github.com/SergeyZh/xiao-soil-moisture-esphome
+    url: https://github.com/${soil_monitor_repository}
     ref: ${soil_monitor_ref}
     refresh: 1d
     files:
@@ -234,12 +234,33 @@ helpers through `external_components` from the same repository and ref. Secrets
 are read only in the local device file and passed to the base as substitutions.
 No `packages/` directory or header files need copying to Home Assistant.
 
-The sample sets `soil_monitor_ref: "main"`. To pin a version, change that one
+The sample sets `soil_monitor_repository: "CrazyCoder/xiao-soil-moisture-esphome"`
+and `soil_monitor_ref: "main"`. To pin a version, change that one
 substitution to a Git tag or full commit SHA; it controls **both** the YAML and
 the C++ component. Git sources are checked for changes when the configuration
 is loaded, at most once per day (`refresh: 1d`). This does not automatically
 install firmware. To use newly published source immediately without waiting for
 the refresh interval, set `soil_monitor_ref` to that commit's SHA.
+
+To use a fork, change only the repository substitution in the **local device
+YAML**, for example:
+
+```yaml
+substitutions:
+  soil_monitor_repository: "your-github-user/xiao-soil-moisture-esphome"
+  soil_monitor_ref: "main"
+```
+
+The package URL and the external C++ source both follow this setting. Keep the
+upstream default in shared files and committed examples. Before the upstream
+has merged these features, use a fork/ref that already contains them.
+
+When migrating an existing device YAML with a hard-coded fork package URL,
+also add `soil_monitor_repository` pointing to that fork; the package URL
+alone does not select the C++ component source. Prefer the parameterized
+`url: https://github.com/${soil_monitor_repository}` shown above so future
+repository changes require editing only one value. Repeat this for each device
+YAML in Home Assistant; changing this checkout does not update HA's local files.
 
 Keep per-device overrides, including any `sensor:` entries with `!extend`, in
 the local device YAML. Future package updates will still merge those overrides.
@@ -384,13 +405,16 @@ python tools/check-builder.py --compile  # also compile both firmware variants
 Use a Python environment with ESPHome installed. These checks create a temporary
 Git snapshot of the working packages and component, then exercise the Builder
 sample from isolated directories containing only YAML and example secrets. They
-check both the button variant on `main` and the timer-only variant pinned to a
-commit. The checks do not publish changes or flash devices.
+check the button variant on `main` and the timer-only variant pinned to a
+commit for both the upstream default and a local fork override. Both YAML and
+C++ must come from the selected repository; accidental HTTPS sources are
+blocked. `--compile` builds each hardware variant once, with fork cases checked
+through code generation. The checks do not publish changes or flash devices.
 
 ## Quick start
 
 ```bash
-git clone https://github.com/SergeyZh/xiao-soil-moisture-esphome.git
+git clone https://github.com/CrazyCoder/xiao-soil-moisture-esphome.git
 cd xiao-soil-moisture-esphome/esphome
 cp secrets.yaml.example secrets.yaml
 ```
@@ -867,7 +891,7 @@ sudo apt install -y git tmux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Configuration and secrets
-git clone https://github.com/SergeyZh/xiao-soil-moisture-esphome.git
+git clone https://github.com/CrazyCoder/xiao-soil-moisture-esphome.git
 cd xiao-soil-moisture-esphome/esphome
 cp secrets.yaml.example secrets.yaml
 $EDITOR secrets.yaml
@@ -990,6 +1014,7 @@ The version appears in the `sw_version` of the Home Assistant device, and on the
 | 1.5.2 | Limits on the USB hold and on the awake time, and a `USB hold` entity |
 | 1.5.3 | Git packages and an external helper component for single-file Builder installs |
 | 1.6.0 | Builder queue/MQTT guard and persistent post-OTA hold cleanup |
+| 1.6.1 | Configurable Git repository for both packages and helper components |
 
 Versions 1.5.0 and 1.5.1 were not released.
 
@@ -999,9 +1024,6 @@ entities. A minor version adds behaviour or entities.
 ## Credits and licence
 
 MIT. Refer to [LICENSE](LICENSE).
-
-This fork is based on
-[CrazyCoder/xiao-soil-moisture-esphome](https://github.com/CrazyCoder/xiao-soil-moisture-esphome).
 
 The pin map and the PWM probe drive come from the factory ESPHome configuration
 of Seeed Studio. That file is in the Resources section of the [product

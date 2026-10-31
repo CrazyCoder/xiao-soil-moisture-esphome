@@ -9,9 +9,11 @@
 # ==================================================================
 
 substitutions:
-  # Use the same Git ref for the YAML packages and their C++ component.
+  # Override the owner/repository in the device YAML when using a fork.
+  # Both the YAML packages and their C++ component use this repository/ref.
+  soil_monitor_repository: "CrazyCoder/xiao-soil-moisture-esphome"
   soil_monitor_ref: "main"
-  soil_monitor_source: "github://SergeyZh/xiao-soil-moisture-esphome@${soil_monitor_ref}"
+  soil_monitor_source: "github://${soil_monitor_repository}@${soil_monitor_ref}"
   dry_init: "2.75"          # default calibration seeds; override per device
   wet_init: "1.2"
   stuck_backoff_ms: "14400000"   # 4h timer-only backoff once the rewake guard trips
@@ -58,7 +60,7 @@ esphome:
     name: "xiao.soil-moisture-monitor"
     # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
     # Bump for every source change that can be deployed independently.
-    version: "1.6.0"
+    version: "1.6.1"
   on_boot:
     # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
     # before radio startup so battery voltage and die temperature are captured
