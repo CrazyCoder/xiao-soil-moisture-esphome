@@ -37,10 +37,13 @@ tools to repeat the measurement are in this repository. Refer to
 | Path | Purpose |
 |---|---|
 | `esphome/` | The firmware. This directory is the ESPHome configuration root. |
-| `esphome/packages/` | Shared base configuration and C++ helpers |
+| `esphome/packages/` | Shared base configuration and optional button package |
+| `components/soil_monitor/` | C++ helpers, loaded as an ESPHome external component |
+| `esphome/sample-builder.yaml` | Single-file device configuration for Home Assistant's ESPHome Device Builder |
 | `esphome/sample-with-button.yaml` | Device sample for a board with the CN4 button |
 | `esphome/sample-timer-only.yaml` | Device sample for a board with CN4 removed |
 | `tools/soil-ota-babysitter.py` | Unattended OTA updates for devices that sleep |
+| `tools/check-builder.py` | Isolated Git-package checks, optionally including firmware builds |
 | `tools/ppk2-monitor.py`, `tools/analyze-capture.py` | Power measurement |
 | `homeassistant/soil-alerts.yaml` | Sample alerts, not tied to any notify service |
 | `docs/power.md` | Measurement method, evidence, and how to repeat it |
@@ -202,10 +205,86 @@ The `mqtt:` block in the base package is tuned for deep sleep:
 > has no `api:` block, so it is already correct. On a battery device a
 > 15 minute restart cycle empties the cell.
 
+## Home Assistant ESPHome Device Builder
+
+Install **ESPHome Device Builder** in Home Assistant, then copy
+[`esphome/sample-builder.yaml`](esphome/sample-builder.yaml) to
+`/config/esphome/plant-1.yaml`. Set `name`, `friendly_name` and `static_ip` for
+your device. Add the keys from
+[`esphome/secrets.yaml.example`](esphome/secrets.yaml.example) to the Builder's
+local `/config/esphome/secrets.yaml`; keep any existing secrets.
+
+Only the device YAML and `secrets.yaml` are needed on Home Assistant. The device
+file loads both YAML packages from this fork:
+
+```yaml
+packages:
+  soil_monitor:
+    url: https://github.com/SergeyZh/xiao-soil-moisture-esphome
+    ref: ${soil_monitor_ref}
+    refresh: 1d
+    files:
+      - esphome/packages/xiao-soil-moisture-monitor.base.yaml
+      - esphome/packages/xiao-soil-moisture-button.yaml
+```
+
+Remove the button package line if CN4 has been removed. The base loads the C++
+helpers through `external_components` from the same repository and ref. Secrets
+are read only in the local device file and passed to the base as substitutions.
+No `packages/` directory or header files need copying to Home Assistant.
+
+The sample sets `soil_monitor_ref: "main"`. To pin a version, change that one
+substitution to a Git tag or full commit SHA; it controls **both** the YAML and
+the C++ component. Git sources are checked for changes when the configuration
+is loaded, at most once per day (`refresh: 1d`). This does not automatically
+install firmware. To use newly published source immediately without waiting for
+the refresh interval, set `soil_monitor_ref` to that commit's SHA.
+
+Keep per-device overrides, including any `sensor:` entries with `!extend`, in
+the local device YAML. Future package updates will still merge those overrides.
+For local development from a clone, use the other samples: they set
+`soil_monitor_source: ../components` to use the checked-out C++ files.
+
+### Wireless updates from Home Assistant
+
+The firmware already enables ESPHome OTA; adding `api:` is unnecessary. The
+Home Assistant server must be able to reach the device's static IP. Deep sleep
+prevents OTA while the device is asleep, so first use **Developer tools →
+Actions** to send a retained hold (replace `plant-1` with your device name):
+
+```yaml
+action: mqtt.publish
+data:
+  topic: plant-1/ota
+  payload: "ON"
+  retain: true
+```
+
+Press the device button once or wait for a scheduled wake. Once it has received
+the hold, select **Install → Wirelessly** in Builder. After the upload, verify
+the new **Firmware build** value, then run the same MQTT action with
+`payload: "OFF"` and `retain: true` to let the device sleep. A hold automatically
+expires after 10 minutes as a backstop; always explicitly release it when done.
+Builder may show **Offline** while the device sleeps; readings and commands in
+Home Assistant continue to use MQTT.
+
+### Checking changes before publishing
+
+```bash
+python tools/check-builder.py            # validate and generate C++
+python tools/check-builder.py --compile  # also compile both firmware variants
+```
+
+Use a Python environment with ESPHome installed. These checks create a temporary
+Git snapshot of the working packages and component, then exercise the Builder
+sample from isolated directories containing only YAML and example secrets. They
+check both the button variant on `main` and the timer-only variant pinned to a
+commit. The checks do not publish changes or flash devices.
+
 ## Quick start
 
 ```bash
-git clone https://github.com/CrazyCoder/xiao-soil-moisture-esphome.git
+git clone https://github.com/SergeyZh/xiao-soil-moisture-esphome.git
 cd xiao-soil-moisture-esphome/esphome
 cp secrets.yaml.example secrets.yaml
 ```
@@ -588,7 +667,7 @@ target. There are three methods.
 
 ### The USB hold
 
-`packages/usb_host_detect.h` reads the USB-Serial-JTAG frame counter twice,
+`components/soil_monitor/usb_host_detect.h` reads the USB-Serial-JTAG frame counter twice,
 20 ms apart. An enumerated USB host sends SOF frames at 1 kHz. The count between
 the two reads must therefore agree with a 20 ms interval. The check accepts only
 a count in that range, and it does the test across two sequential windows. A
@@ -682,7 +761,7 @@ sudo apt install -y git tmux
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. Configuration and secrets
-git clone https://github.com/CrazyCoder/xiao-soil-moisture-esphome.git
+git clone https://github.com/SergeyZh/xiao-soil-moisture-esphome.git
 cd xiao-soil-moisture-esphome/esphome
 cp secrets.yaml.example secrets.yaml
 $EDITOR secrets.yaml
@@ -803,6 +882,7 @@ The version appears in the `sw_version` of the Home Assistant device, and on the
 | 1.3.0 | Generic runtime controls and an optional rewake guard |
 | 1.4.0 | Home Assistant config switch for the persistent rewake guard |
 | 1.5.2 | Limits on the USB hold and on the awake time, and a `USB hold` entity |
+| 1.5.3 | Git packages and an external helper component for single-file Builder installs |
 
 Versions 1.5.0 and 1.5.1 were not released.
 
@@ -812,6 +892,9 @@ entities. A minor version adds behaviour or entities.
 ## Credits and licence
 
 MIT. Refer to [LICENSE](LICENSE).
+
+This fork is based on
+[CrazyCoder/xiao-soil-moisture-esphome](https://github.com/CrazyCoder/xiao-soil-moisture-esphome).
 
 The pin map and the PWM probe drive come from the factory ESPHome configuration
 of Seeed Studio. That file is in the Resources section of the [product

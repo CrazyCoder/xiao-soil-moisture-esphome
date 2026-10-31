@@ -9,6 +9,9 @@
 # ==================================================================
 
 substitutions:
+  # Use the same Git ref for the YAML packages and their C++ component.
+  soil_monitor_ref: "main"
+  soil_monitor_source: "github://SergeyZh/xiao-soil-moisture-esphome@${soil_monitor_ref}"
   dry_init: "2.75"          # default calibration seeds; override per device
   wet_init: "1.2"
   stuck_backoff_ms: "14400000"   # 4h timer-only backoff once the rewake guard trips
@@ -38,20 +41,24 @@ substitutions:
   # roughly 3% of an AA, against the whole cell if nothing capped a wedge.
   max_awake_ms:           "1200000"    # 20 min
 
+# Fetch helper headers through ESPHome's component loader, not local includes.
+# Local checkouts can set soil_monitor_source: ../components.
+external_components:
+  - source: ${soil_monitor_source}
+    components: [soil_monitor]
+    refresh: 1d
+
+soil_monitor:
+
 esphome:
   name: "${name}"
   friendly_name: "${friendly_name}"
   name_add_mac_suffix: false        # stable hostname/topics for static IP + OTA
-  includes:
-    - packages/usb_host_detect.h    # debounced SOF-counter USB host check
-    - packages/battery_curve.h      # alkaline_aa_percent(): AA discharge curve
-    - packages/soil_monitor_helpers.h
-    - packages/soil_settings.h         # generic SET/RESET settings command parser
   project:
     name: "xiao.soil-moisture-monitor"
     # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
     # Bump for every source change that can be deployed independently.
-    version: "1.5.2"
+    version: "1.5.3"
   on_boot:
     # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
     # before radio startup so battery voltage and die temperature are captured
@@ -995,7 +1002,7 @@ sensor:
     accuracy_decimals: 1
     update_interval: never
 
-  # Derived from the voltage via the alkaline AA curve in packages/battery_curve.h.
+  # Derived from the voltage via the alkaline AA curve in components/soil_monitor/battery_curve.h.
   # Keeps the "Battery" name (MQTT topic + HA entity) from the old ADC sensor.
   - platform: template
     id: battery_sensor
@@ -1130,9 +1137,9 @@ ota:
   - platform: esphome
 
 mqtt:
-  broker: !secret mqtt_broker
-  username: !secret mqtt_username
-  password: !secret mqtt_password
+  broker: "${mqtt_broker}"
+  username: "${mqtt_username}"
+  password: "${mqtt_password}"
   discovery_unique_id_generator: mac   # default 'legacy' collides across devices -> HA ignores 2nd+ device
   enable_on_boot: false       # enabled from wifi.on_connect: skips the client's 5s retry gate
   reboot_timeout: 0s          # don't reboot if broker is down; run_duration handles it
@@ -1309,8 +1316,8 @@ mqtt:
                         retain: true
 
 wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
+  ssid: "${wifi_ssid}"
+  password: "${wifi_password}"
   on_connect:
     - mqtt.enable             # connect immediately now that the network is up
   fast_connect: true          # skip full scan -> faster wake connect
@@ -1318,9 +1325,9 @@ wifi:
   reboot_timeout: 0s          # deep-sleep friendly: sleep instead of reboot on wifi loss
   manual_ip:                  # static -> skip DHCP each wake (battery)
     static_ip: "${static_ip}"
-    gateway: !secret wifi_gateway
-    subnet: !secret wifi_subnet
-    dns1: !secret wifi_dns
+    gateway: "${wifi_gateway}"
+    subnet: "${wifi_subnet}"
+    dns1: "${wifi_dns}"
   ap:
     ssid: "setup-${name}"
     # A SoftAP + captive portal on a battery node is pure drain and nobody is

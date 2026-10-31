@@ -1,0 +1,38 @@
+# Copy ONLY this file to /config/esphome/<plant>.yaml in Home Assistant.
+# Add the keys from secrets.yaml.example to the Builder's local secrets.yaml.
+# No local packages/ or C++ headers are needed.
+substitutions:
+  name: "plant-1"
+  friendly_name: "Soil - Plant 1"
+  static_ip: "192.168.1.61"
+
+  # Set a tag/commit here to pin BOTH the YAML and C++ to the same release.
+  soil_monitor_ref: "main"
+
+  wifi_ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+  wifi_gateway: !secret wifi_gateway
+  wifi_subnet: !secret wifi_subnet
+  wifi_dns: !secret wifi_dns
+  mqtt_broker: !secret mqtt_broker
+  mqtt_username: !secret mqtt_username
+  mqtt_password: !secret mqtt_password
+
+  # Optional overrides (defaults live in the base package):
+  # sleep_normal_ms: "7200000"
+  # sleep_almost_dry_ms: "3600000"
+  # sleep_dry_ms: "14400000"
+  # external_antenna: "true"
+  # rewake_guard_default: "true"
+  # dry_init: "2.75"
+  # wet_init: "1.2"
+
+packages:
+  soil_monitor:
+    url: https://github.com/SergeyZh/xiao-soil-moisture-esphome
+    ref: ${soil_monitor_ref}
+    refresh: 1d
+    files:
+      - esphome/packages/xiao-soil-moisture-monitor.base.yaml
+      # Remove the following line on boards with the CN4 button removed.
+      - esphome/packages/xiao-soil-moisture-button.yaml
