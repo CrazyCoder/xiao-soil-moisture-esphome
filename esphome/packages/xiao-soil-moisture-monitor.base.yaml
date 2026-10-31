@@ -9,6 +9,11 @@
 # ==================================================================
 
 substitutions:
+  # Override the owner/repository in the device YAML when using a fork.
+  # Both the YAML packages and their C++ component use this repository/ref.
+  soil_monitor_repository: "CrazyCoder/xiao-soil-moisture-esphome"
+  soil_monitor_ref: "main"
+  soil_monitor_source: "github://${soil_monitor_repository}@${soil_monitor_ref}"
   dry_init: "2.75"          # default calibration seeds; override per device
   wet_init: "1.2"
   stuck_backoff_ms: "14400000"   # 4h timer-only backoff once the rewake guard trips
@@ -38,26 +43,39 @@ substitutions:
   # roughly 3% of an AA, against the whole cell if nothing capped a wedge.
   max_awake_ms:           "1200000"    # 20 min
 
+# Fetch helper headers through ESPHome's component loader, not local includes.
+# Local checkouts can set soil_monitor_source: ../components.
+external_components:
+  - source: ${soil_monitor_source}
+    components: [soil_monitor]
+    refresh: 1d
+
+soil_monitor:
+
 esphome:
   name: "${name}"
   friendly_name: "${friendly_name}"
   name_add_mac_suffix: false        # stable hostname/topics for static IP + OTA
-  includes:
-    - packages/usb_host_detect.h    # debounced SOF-counter USB host check
-    - packages/battery_curve.h      # alkaline_aa_percent(): AA discharge curve
-    - packages/soil_monitor_helpers.h
-    - packages/soil_settings.h         # generic SET/RESET settings command parser
   project:
     name: "xiao.soil-moisture-monitor"
     # Fleet firmware release, reported in MQTT discovery / HA device sw_version.
     # Bump for every source change that can be deployed independently.
-    version: "1.5.2"
+    version: "1.6.1"
   on_boot:
     # Sensors initialize at 600 and WiFi at 250. Run just after sensor setup but
     # before radio startup so battery voltage and die temperature are captured
     # at the same repeatable, low-load point in every wake.
     priority: 599
     then:
+      # Capture this BEFORE safe_mode can mark the new image valid. Also
+      # covers the first upgrade from firmware without our OTA callbacks.
+      - lambda: |-
+          if (soil_ota_pending_verify()) {
+            id(ota_release_pending) = true;
+          }
+      - lambda: |-
+          ota_release_pending->update();
+          global_preferences->sync();
       # --- Rewake safety: count GPIO wakes and failed GPIO wake reports ---
       # A wet/stuck button re-wakes the device the instant it sleeps (level-
       # triggered wake, wakeup_pin_mode IGNORE re-arms it). The configurable
@@ -195,6 +213,10 @@ globals:
     type: bool
     restore_value: no
     initial_value: 'false'
+  - id: ota_release_pending
+    type: bool
+    restore_value: yes      # retry OFF after reboot / an unavailable broker
+    initial_value: 'false'
   - id: usb_hold            # true while an enumerated USB host holds us awake
     type: bool
     restore_value: no
@@ -233,6 +255,42 @@ globals:
     initial_value: '0'
 
 script:
+  # The broker echoes OFF only after accepting it. Keep the persistent marker
+  # until that echo, and retry at the next wake if this connection is lost.
+  # Clear ota_hold FIRST so our own echo cannot sleep us before the full report
+  # and OTA image validation have finished.
+  - id: release_ota_hold
+    mode: single
+    then:
+      - lambda: |-
+          id(ota_release_pending) = true;
+          id(ota_hold) = false;
+      - lambda: |-
+          ota_release_pending->update();
+          global_preferences->sync();
+      - script.stop: ota_hold_timeout
+      - mqtt.publish:
+          topic: "${name}/ota"
+          payload: "OFF"
+          qos: 1
+          retain: true
+      - wait_until:
+          condition:
+            lambda: 'return !id(ota_release_pending);'
+          timeout: 2s
+      - if:
+          condition:
+            lambda: 'return !id(usb_hold) && !id(calibration_active) && !id(settings_active);'
+          then:
+            - deep_sleep.allow: deep_sleep_control
+      # report_and_sleep owns sleep while it is running. On an OTA error its
+      # initial report may already be complete, so close that wake here.
+      - if:
+          condition:
+            lambda: 'return !id(report_and_sleep).is_running() && !id(usb_hold) && !id(calibration_active) && !id(settings_active);'
+          then:
+            - script.execute: enter_sleep
+
   # The probe is powered before WiFi so it is settled for the normal fast
   # report. If WiFi/MQTT is unavailable, report_and_sleep never samples it and
   # the 30 s run-duration cap would otherwise leave it powered the whole time.
@@ -700,12 +758,7 @@ script:
                   # would re-acquire it on the very next wake and loop this
                   # watchdog. ota_hold_timeout normally clears the topic at
                   # 10 min, so reaching here means that failed too.
-                  - mqtt.publish:
-                      topic: "${name}/ota"
-                      payload: "OFF"
-                      retain: true
-                  - delay: 500ms
-                  - script.execute: enter_sleep
+                  - script.execute: release_ota_hold
 
   # ---- Guarded sleep: all explicit sleep points go through here ----
   # >=5 consecutive GPIO wakes = wet/stuck button. Sleep timer-only (button
@@ -751,21 +804,10 @@ script:
           condition:
             lambda: 'return id(ota_hold);'
           then:
-            - lambda: 'id(ota_hold) = false;'
             - logger.log:
                 level: WARN
                 format: "OTA hold timed out after 10 minutes - releasing local hold"
-            - mqtt.publish:
-                topic: "${name}/ota"
-                payload: "OFF"
-                retain: true
-            - delay: 500ms
-            - if:
-                condition:
-                  lambda: 'return !id(usb_hold) && !id(calibration_active) && !id(settings_active);'
-                then:
-                  - deep_sleep.allow: deep_sleep_control
-                  - script.execute: enter_sleep
+            - script.execute: release_ota_hold
 
   # ------------------- Calibration (3x button) -------------------
   - id: do_calibration
@@ -892,6 +934,13 @@ script:
           id(failed_report_streak) = 0;   // clears the offline backoff ladder
           id(report_ok) = true;           // disarms connect_watchdog
           id(safe_mode_ctrl).mark_successful();
+      - if:
+          condition:
+            lambda: 'return id(ota_release_pending);'
+          then:
+            - logger.log: "OTA boot reported successfully - clearing retained OTA hold"
+            - script.execute: release_ota_hold
+            - script.wait: release_ota_hold
       - delay: 1s                        # let MQTT flush the publishes
       # The ONLY place a USB hold may be acquired - see usb_hold_update.
       - script.execute:                  # single-lambda script: completes inline
@@ -995,7 +1044,7 @@ sensor:
     accuracy_decimals: 1
     update_interval: never
 
-  # Derived from the voltage via the alkaline AA curve in packages/battery_curve.h.
+  # Derived from the voltage via the alkaline AA curve in components/soil_monitor/battery_curve.h.
   # Keeps the "Battery" name (MQTT topic + HA entity) from the old ADC sensor.
   - platform: template
     id: battery_sensor
@@ -1128,6 +1177,21 @@ safe_mode:
 
 ota:
   - platform: esphome
+    on_begin:
+      then:
+        - lambda: |-
+            id(ota_release_pending) = true;
+        - lambda: |-
+            ota_release_pending->update();
+            global_preferences->sync();
+    # Do not sleep from on_end: OTA still needs to finish/reboot. The new
+    # image releases the hold after its first complete MQTT report instead.
+    on_error:
+      then:
+        - script.execute: release_ota_hold
+    on_abort:
+      then:
+        - script.execute: release_ota_hold
 
 mqtt:
   broker: !secret mqtt_broker
@@ -1146,15 +1210,25 @@ mqtt:
       then:
         - if:
             condition:
-              lambda: 'return x == "ON";'
+              lambda: 'return x == "ON" && !id(ota_release_pending);'
             then:
               - lambda: 'id(ota_hold) = true;'
               - deep_sleep.prevent: deep_sleep_control
               - script.execute: ota_hold_timeout
             else:
+              # A stale retained ON must not clear the retry marker.
               - if:
                   condition:
-                    lambda: 'return id(ota_hold);'   # ON -> OFF transition: release and sleep now
+                    lambda: 'return x == "OFF" && id(ota_release_pending);'
+                  then:
+                    - lambda: |-
+                        id(ota_release_pending) = false;
+                    - lambda: |-
+                        ota_release_pending->update();
+                        global_preferences->sync();
+              - if:
+                  condition:
+                    lambda: 'return x == "OFF" && id(ota_hold);'
                   then:
                     - lambda: 'id(ota_hold) = false;'
                     - script.stop: ota_hold_timeout
@@ -1164,7 +1238,11 @@ mqtt:
                           lambda: 'return !id(usb_hold) && !id(calibration_active) && !id(settings_active);'
                         then:
                           - deep_sleep.allow: deep_sleep_control
-                          - script.execute: enter_sleep
+                          - if:
+                              condition:
+                                lambda: 'return !id(report_and_sleep).is_running();'
+                              then:
+                                - script.execute: enter_sleep
 
     # Retained one-shot command, so sleeping/buttonless nodes can be repaired:
     #   RESET

@@ -37,12 +37,16 @@ tools to repeat the measurement are in this repository. Refer to
 | Path | Purpose |
 |---|---|
 | `esphome/` | The firmware. This directory is the ESPHome configuration root. |
-| `esphome/packages/` | Shared base configuration and C++ helpers |
+| `esphome/packages/` | Shared base configuration and optional button package |
+| `components/soil_monitor/` | C++ helpers, loaded as an ESPHome external component |
+| `esphome/sample-builder.yaml` | Single-file device configuration for Home Assistant's ESPHome Device Builder |
 | `esphome/sample-with-button.yaml` | Device sample for a board with the CN4 button |
 | `esphome/sample-timer-only.yaml` | Device sample for a board with CN4 removed |
 | `tools/soil-ota-babysitter.py` | Unattended OTA updates for devices that sleep |
+| `tools/check-builder.py` | Isolated Git-package checks, optionally including firmware builds |
 | `tools/ppk2-monitor.py`, `tools/analyze-capture.py` | Power measurement |
 | `homeassistant/soil-alerts.yaml` | Sample alerts, not tied to any notify service |
+| `homeassistant/addons/soil-builder-ota/` | Local HA app: automatic MQTT holds and OFF cleanup for Builder's offline queue |
 | `docs/power.md` | Measurement method, evidence, and how to repeat it |
 | `docs/hardware-notes.md` | A hardware defect that empties batteries |
 
@@ -201,6 +205,213 @@ The `mqtt:` block in the base package is tuned for deep sleep:
 > every 15 minutes, because no client connects to the API. This configuration
 > has no `api:` block, so it is already correct. On a battery device a
 > 15 minute restart cycle empties the cell.
+
+## Home Assistant ESPHome Device Builder
+
+Install **ESPHome Device Builder** in Home Assistant, then copy
+[`esphome/sample-builder.yaml`](esphome/sample-builder.yaml) to
+`/config/esphome/plant-1.yaml`. Set `name`, `friendly_name` and `static_ip` for
+your device. Add the keys from
+[`esphome/secrets.yaml.example`](esphome/secrets.yaml.example) to the Builder's
+local `/config/esphome/secrets.yaml`; keep any existing secrets.
+
+Only the device YAML and `secrets.yaml` are needed on Home Assistant. The device
+file loads both YAML packages from the selected repository:
+
+```yaml
+packages:
+  soil_monitor:
+    url: https://github.com/${soil_monitor_repository}
+    ref: ${soil_monitor_ref}
+    refresh: 1d
+    files:
+      - esphome/packages/xiao-soil-moisture-monitor.base.yaml
+      - esphome/packages/xiao-soil-moisture-button.yaml
+```
+
+Remove the button package line if CN4 has been removed. The base loads the C++
+helpers through `external_components` from the same repository and ref. The
+base keeps its original `!secret` references: ESPHome falls back to the local
+`secrets.yaml` beside the device YAML when the remote package has no secrets
+file of its own. No duplicate credential substitutions, local `packages/`
+directory or header files are needed.
+
+The sample sets `soil_monitor_repository: "CrazyCoder/xiao-soil-moisture-esphome"`
+and `soil_monitor_ref: "main"`. To pin a version, change that one
+substitution to a Git tag or full commit SHA; it controls **both** the YAML and
+the C++ component. Git sources are checked for changes when the configuration
+is loaded, at most once per day (`refresh: 1d`). This does not automatically
+install firmware. To use newly published source immediately without waiting for
+the refresh interval, set `soil_monitor_ref` to that commit's SHA.
+
+To use a fork, change only the repository substitution in the **local device
+YAML**, for example:
+
+```yaml
+substitutions:
+  soil_monitor_repository: "your-github-user/xiao-soil-moisture-esphome"
+  soil_monitor_ref: "main"
+```
+
+The package URL and the external C++ source both follow this setting. Keep the
+upstream default in shared files and committed examples. Before the upstream
+has merged these features, use a fork/ref that already contains them.
+
+When migrating an existing device YAML with a hard-coded fork package URL,
+also add `soil_monitor_repository` pointing to that fork; the package URL
+alone does not select the C++ component source. Prefer the parameterized
+`url: https://github.com/${soil_monitor_repository}` shown above so future
+repository changes require editing only one value. Repeat this for each device
+YAML in Home Assistant; changing this checkout does not update HA's local files.
+
+Keep per-device overrides, including any `sensor:` entries with `!extend`, in
+the local device YAML. Future package updates will still merge those overrides.
+For local development from a clone, use the other samples: they set
+`soil_monitor_source: ../components` to use the checked-out C++ files.
+
+The base package already supplies `esphome:`, `logger:` and `ota:`. Set the
+device identity in `substitutions`; no generated header or `api:` block is
+needed. Keep local OTA settings when enabling encryption. The devices belong
+to the MQTT integration in Home Assistant, and an ESPHome integration discovery
+prompt can be ignored. Builder still manages their firmware.
+
+### Manual wireless updates from Home Assistant
+
+This is the manual procedure without OTA Guard. If using the guard, follow
+[Automatic queued updates](#automatic-queued-updates-with-mqtt-wake-holds)
+instead; it manages ON/OFF itself.
+
+The firmware already enables ESPHome OTA; adding `api:` is unnecessary. The
+Home Assistant server must be able to reach the device's static IP. Deep sleep
+prevents OTA while the device is asleep, so first use **Developer tools →
+Actions** to send a retained hold (replace `plant-1` with your device name):
+
+```yaml
+action: mqtt.publish
+data:
+  topic: plant-1/ota
+  payload: "ON"
+  retain: true
+```
+
+Press the device button once or wait for a scheduled wake. Once it has received
+the hold, select **Install → Wirelessly** in Builder. After the upload, verify
+the new **Firmware build** value, then run the same MQTT action with
+`payload: "OFF"` and `retain: true` to let the device sleep. A hold automatically
+expires after 10 minutes as a backstop; always explicitly release it when done.
+Builder may show **Offline** while the device sleeps; readings and commands in
+Home Assistant continue to use MQTT.
+
+### Encrypted OTA updates
+
+The shared package enables OTA without a password or encryption. To require
+encrypted, authenticated updates, build with **ESPHome 2026.9.0 or newer** in
+Builder and add this override to the local device YAML (shown for `kedr`):
+
+```yaml
+esphome:
+  min_version: 2026.9.0
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret kedr_ota_key
+```
+
+Put a unique, random 32-byte Base64 key in the local `secrets.yaml`:
+
+```yaml
+kedr_ota_key: "YOUR_BASE64_KEY"
+```
+
+Generate one with `openssl rand -base64 32` on a trusted machine. If this device
+already used an `api.encryption.key`, the same key can be moved here. Keep the
+key private and backed up; do not commit it to Git. The key both encrypts the
+firmware transfer and authenticates the uploader. Do not combine it with
+`password:`; a password alone authenticates uploads but does not encrypt the
+firmware. No `api:` block or Home Assistant ESPHome integration is needed.
+
+For the first encrypted installation, flash over **USB**. The running firmware
+must already support encryption before it can accept an encrypted OTA upload;
+simply adding this override to an older device can fail with `the device did
+not offer encryption; refusing to send the image in plaintext`.
+
+If USB is impractical, follow the official
+[encryption migration instructions](https://esphome.io/components/ota/esphome/#enabling-encryption-on-an-existing-device).
+For a device that cannot yet encrypt, the single-install migration temporarily
+adds `allow_plaintext_upload: true` under `encryption:` and retains any existing
+OTA password for that upload. That migration upload is **unencrypted**; the
+installed firmware requires encryption afterwards. Remove the temporary option
+and any `password:` immediately after the migration. Normal updates then use
+the encrypted configuration above, with the same MQTT hold/release procedure.
+If every transfer must be encrypted, use USB for the initial installation.
+
+See the [ESPHome OTA encryption documentation](https://esphome.io/components/ota/esphome/#encryption).
+
+### Automatic queued updates with MQTT wake holds
+
+Install the local
+[Soil Builder OTA Guard](homeassistant/addons/soil-builder-ota/README.md) app on
+Home Assistant and configure `kedr.yaml` → `kedr` (or your own device mappings).
+It connects to Builder's queued-install API and your MQTT broker. The complete
+installation steps and settings are in the linked guide.
+
+For local installation, copy the app folder into Home Assistant's **`local_apps`
+Samba share**, giving `local_apps/soil-builder-ota/config.yaml`. This share is
+separate from `config`; do not create `config/addons` or `config/local_apps`.
+No change to Home Assistant's `configuration.yaml` is required. After copying,
+check for updates in the app store and refresh its page.
+
+The defaults include both `kedr.yaml` → `kedr` and `palm.yaml` → `palm`.
+Use Guard **1.0.1 or newer**. Set its `builder_url` to the local Builder
+**Ingress port**, obtained with `ha addons info 5c53de3b_esphome`, for example
+`http://127.0.0.1:<ingress_port>`. Leave Builder username/password empty for
+the HA app; enter your MQTT login separately. There is no need to expose
+Builder's port 6052 to the LAN. For an existing local Guard installation,
+replace the source files and use **Update** in the store; Restart alone does
+not rebuild its image.
+
+Then use **Install → Wirelessly** in Builder while the device is Offline.
+Builder compiles first; the guard publishes retained `<name>/ota = ON` only
+when the offline update is ready. The device naturally wakes, stays awake and
+receives the update through Builder's normal encrypted OTA path. The guard
+publishes retained **OFF** after success, error or cancellation, and cleans up
+on connection loss, shutdown and restart. No manual OFF step is required with
+the guard enabled. Do not run the old babysitter at the same time for a device
+managed by the guard.
+
+Check both a successful install and cancellation before wake. In each case,
+Guard should acknowledge OFF. Then open **Settings → Devices & services → MQTT
+→ Configure → Listen to a topic**, start a fresh subscription to `kedr/ota`
+(or `palm/ota`), and confirm the initial value is **OFF, Retain: true**. The
+device should sleep again when no other holds remain. HA readings remain
+available during normal sleep, so use Builder's Offline state for this check.
+Both scenarios have been verified during deployment; the linked guide gives
+the complete test sequence and troubleshooting steps.
+
+Firmware **1.6.0** adds an independent safeguard: the new image publishes
+retained OFF after a full MQTT report and OTA validation. OTA error/abort and
+the 10 minute hold watchdog use the same cleanup. A persistent marker retries
+OFF on later wakes until the broker echoes it. A failed network cannot trap
+the local OTA hold forever, even if the HA guard is unavailable. USB-powered
+maintenance and active calibration/settings operations still keep their own
+holds.
+
+### Checking changes before publishing
+
+```bash
+python tools/check-builder.py            # validate and generate C++
+python tools/check-builder.py --compile  # also compile both firmware variants
+```
+
+Use a Python environment with ESPHome installed. These checks create a temporary
+Git snapshot of the working packages and component, then exercise the Builder
+sample from isolated directories containing only YAML and example secrets. They
+check the button variant on `main` and the timer-only variant pinned to a
+commit for both the upstream default and a local fork override. Both YAML and
+C++ must come from the selected repository; accidental HTTPS sources are
+blocked. `--compile` builds each hardware variant once, with fork cases checked
+through code generation. The checks do not publish changes or flash devices.
 
 ## Quick start
 
@@ -588,7 +799,7 @@ target. There are three methods.
 
 ### The USB hold
 
-`packages/usb_host_detect.h` reads the USB-Serial-JTAG frame counter twice,
+`components/soil_monitor/usb_host_detect.h` reads the USB-Serial-JTAG frame counter twice,
 20 ms apart. An enumerated USB host sends SOF frames at 1 kHz. The count between
 the two reads must therefore agree with a 20 ms interval. The check accepts only
 a count in that range, and it does the test across two sequential windows. A
@@ -803,6 +1014,9 @@ The version appears in the `sw_version` of the Home Assistant device, and on the
 | 1.3.0 | Generic runtime controls and an optional rewake guard |
 | 1.4.0 | Home Assistant config switch for the persistent rewake guard |
 | 1.5.2 | Limits on the USB hold and on the awake time, and a `USB hold` entity |
+| 1.5.3 | Git packages and an external helper component for single-file Builder installs |
+| 1.6.0 | Builder queue/MQTT guard and persistent post-OTA hold cleanup |
+| 1.6.1 | Configurable Git repository for both packages and helper components |
 
 Versions 1.5.0 and 1.5.1 were not released.
 

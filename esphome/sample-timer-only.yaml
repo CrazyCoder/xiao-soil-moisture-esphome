@@ -9,6 +9,9 @@ substitutions:
   friendly_name: "Soil - Plant 2"
   static_ip: "192.168.1.62"
 
+  # Build from this checkout. The Builder sample uses GitHub instead.
+  soil_monitor_source: ../components
+
   # Optional. The defaults are in the base package.
   # sleep_normal_ms:     "7200000"   #  2 h - detect Almost Dry within 2 h
   # sleep_almost_dry_ms: "3600000"   #  1 h - detect Dry within 1 h
